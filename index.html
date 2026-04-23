@@ -109,13 +109,11 @@
 		let maxFecha = 0;
 		
 		for (const [id, data] of Object.entries(salas)) {
-		  // Encontrar la sala más reciente en la historia
 		  if ((data.creadaEn || 0) > maxFecha) { 
 			maxFecha = data.creadaEn; 
 			ultimaSalaId = id; 
 			ultimaSalaData = data; 
 		  }
-		  // Verificar si hay alguna sala viva (Regla 3)
 		  if (data.fase === 'esperando' || data.fase === 'jugando') {
 			salaActivaId = id;
 			salaActivaData = data;
@@ -130,7 +128,6 @@
 	  const adminGuardado = JSON.parse(localStorage.getItem('tapazo_admin') || '{}');
 
 	  if (!salaAMostrarId) {
-		// Escenario: Base de datos limpia, cero salas
 		document.getElementById('admin-sala-id').textContent = '—';
 		document.getElementById('admin-fase').textContent    = 'Sin salas';
 		document.getElementById('admin-lista').innerHTML     = '<p class="estado-vacio">No hay salas creadas aún.</p>';
@@ -141,12 +138,10 @@
 		return;
 	  }
 
-	  // Renderizar información de la sala superior
 	  document.getElementById('admin-sala-id').textContent = salaAMostrarId;
 	  document.getElementById('admin-fase').textContent    = traducirFase(salaAMostrarData.fase);
 
 	  if (salaActivaId) {
-		// REGLA 3: Hay una sala activa. Ocultamos crear, mostramos administrar.
 		controlActiva.style.display = 'block';
 		controlCrear.style.display  = 'none';
 		
@@ -165,15 +160,12 @@
 		  }
 		};
 	  } else {
-		// REGLA 4: Si las salas previas están inactivas, permitimos crear.
 		controlActiva.style.display = 'none';
 		controlCrear.style.display  = 'flex';
 		
-		// REGLA 2: Autocompletar el Nequi con el celular de registro del Admin
 		if(adminGuardado.celular) document.getElementById('input-nequi-host').value = adminGuardado.celular;
 	  }
 
-	  // Escuchar a los jugadores de la sala que estamos mostrando
 	  escucharSala(salaAMostrarId, data => renderAdminPanel(salaAMostrarId, data));
 	}
 
@@ -195,7 +187,8 @@
 
       document.getElementById('admin-lista').innerHTML = jugadores.map(j => {
         const pagado = j.pagado === true;
-        const numDisplay = (j.numero !== null && j.numero !== undefined)
+        // Corrección: Usar typeof para evitar bugs con valores null borrados por Firebase
+        const numDisplay = (typeof j.numero === 'number')
           ? `<span class="num-badge">${j.numero}</span>`
           : `<span class="badge-pendiente">Sin #</span>`;
         return `
@@ -256,7 +249,6 @@
       await set(nuevoRef, { nombre, celular: celularValido, numero: null, pagado: false, registradoEn: Date.now() });
       localStorage.setItem('tapazo_jugador', JSON.stringify({ salaId, jugadorId: miJugadorId, nombre, celular: celularValido }));
 
-      // Mostrar nequi si existe
       document.getElementById('confirmacion-nombre').textContent = nombre;
       if (data.nequiHost) {
         document.getElementById('confirmacion-nequi').style.display = 'flex';
@@ -265,7 +257,6 @@
         document.getElementById('confirmacion-nequi').style.display = 'none';
       }
 
-      // Escuchar si el juego arranca mientras espera
       escucharSala(salaId, d => {
         if (d.fase === 'jugando') {
           detenerEscucha();
@@ -329,6 +320,7 @@
 
     function renderHostMonitoreo(data) {
       const jugadores = data.jugadores ? Object.values(data.jugadores) : [];
+      // Corrección: Filtrar estrictamente por tipo número
       const listos    = jugadores.filter(j => typeof j.numero === 'number').length;
       document.getElementById('monitor-listos').textContent     = listos;
       document.getElementById('monitor-pendientes').textContent = jugadores.length - listos;
@@ -338,6 +330,7 @@
            <span>👤 ${escaparHTML(j.nombre)}</span>
            ${typeof j.numero === 'number' ? '<span class="badge-verde">✅ Listo</span>' : '<span class="badge-pendiente">⏳ Pendiente</span>'}
          </div>`).join('');
+      // Corrección: Solo pasa a resultados si TODOS tienen número estricto
       if (jugadores.length >= 2 && jugadores.every(j => typeof j.numero === 'number')) {
         detenerEscucha();
         update(salaRef(miSalaId), { fase: 'resultados' });
@@ -356,6 +349,7 @@
         campo.focus(); return;
       }
       document.getElementById('error-numero').classList.remove('visible');
+      // Corrección: ParseInt seguro y actualización de DB
       await update(jugadorRef(miSalaId, miJugadorId), { numero: parseInt(valor, 10) });
       mostrar('numero-guardado');
     }
@@ -368,6 +362,8 @@
       if (!snapJ.exists()) return;
       const nequiHost    = snapS.exists() ? snapS.val().nequiHost : null;
       const jugadoresRaw = snapJ.val();
+      
+      // Corrección: Filtrar estrictamente por tipo número
       const jugadores    = Object.entries(jugadoresRaw)
         .filter(([, j]) => typeof j.numero === 'number')
         .map(([id, j]) => ({ ...j, _id: id }));
@@ -410,6 +406,7 @@
     }
 
     function renderPanelPagos(salaId, jugadoresObj) {
+      // Corrección: Filtrar estrictamente por tipo número
       const jugadores = Object.entries(jugadoresObj)
         .filter(([, j]) => typeof j.numero === 'number')
         .map(([id, j]) => ({ ...j, _id: id }));
@@ -430,6 +427,7 @@
     }
 
     function nuevoJuego() {
+      // Corrección: Limpieza segura y redirección acorde al estado
 	  localStorage.removeItem('tapazo_jugador');
 	  const url = new URL(window.location.href);
 	  url.searchParams.delete('sala');
@@ -437,7 +435,6 @@
 	  miSalaId = null; miJugadorId = null; soyHost = false;
 	  detenerEscucha();
 	  
-	  // Si es el admin, lo mandamos a su panel. Si no, al inicio.
 	  if (soyAdmin) {
 		cargarPanelAdmin();
 	  } else {
@@ -457,7 +454,8 @@
         const snap = await get(adminRef());
         if (snap.exists()) {
           const cred = snap.val().credenciales;
-          if (cred && cred.usuario === adminGuardado.usuario && cred.celular === adminGuardado.celular) {
+          // Corrección: Login estricto forzando String
+          if (cred && cred.usuario === adminGuardado.usuario && String(cred.celular) === String(adminGuardado.celular)) {
             soyAdmin = true;
             bindAdminEvents();
             await cargarPanelAdmin();
@@ -485,7 +483,6 @@
             } else if (data.fase === 'resultados') {
               cargarYMostrarResultados(salaEnURL);
             } else {
-              // Ya registrado → confirmación, escucha por si arranca el juego
               document.getElementById('confirmacion-nombre').textContent = guardado.nombre;
               if (data.nequiHost) {
                 document.getElementById('confirmacion-nequi').style.display = 'flex';
@@ -499,8 +496,9 @@
                   escucharSala(salaEnURL, d2 => {
                     if (d2.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaEnURL); }
                   });
+                } else if (d.fase === 'resultados') {
+                  detenerEscucha(); cargarYMostrarResultados(salaEnURL);
                 }
-                if (d.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaEnURL); }
               });
               mostrar('participante-confirmado');
             }
@@ -810,7 +808,6 @@
 
   <div class="contenedor">
 
-    <!-- ══ INICIO ══════════════════════════════════════════════ -->
     <div id="pantalla-inicio" class="pantalla">
 	  <div class="tarjeta" style="text-align:center;padding:32px 20px;">
 		<div class="deco">🍺🎲🍺</div>
@@ -820,7 +817,6 @@
 	  <button id="btn-acceso-admin" class="btn btn-secundario" style="margin-top:16px;">⚙ Acceso Administrador</button>
 	</div>
 
-    <!-- ══ ADMIN LOGIN ══════════════════════════════════════════ -->
     <div id="pantalla-admin-login" class="pantalla">
       <div class="tarjeta" style="text-align:center;gap:8px;display:flex;flex-direction:column;">
         <div style="font-size:2.2rem;">🔐</div>
@@ -842,7 +838,6 @@
       <button id="btn-back-inicio" class="btn btn-secundario">← Volver</button>
     </div>
 
-    <!-- ══ ADMIN PANEL ══════════════════════════════════════════ -->
     <div id="pantalla-admin-panel" class="pantalla">
 	  <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
 		<div class="admin-header">
@@ -885,7 +880,6 @@
 	  <button id="btn-cerrar-admin" class="btn btn-rojo" style="font-size:1.1rem;padding:14px 20px;">🚪 Cerrar sesión</button>
 	</div>
 
-    <!-- ══ HOST ESPERA ══════════════════════════════════════════ -->
     <div id="pantalla-host-espera" class="pantalla">
       <div class="tarjeta" style="text-align:center;gap:10px;display:flex;flex-direction:column;">
         <h2 style="text-align:center;">🔗 Comparte el link</h2>
@@ -909,7 +903,6 @@
       <p style="text-align:center;font-size:0.8rem;color:rgba(255,255,255,0.3);">Mínimo 2 participantes para iniciar</p>
     </div>
 
-    <!-- ══ HOST MONITOREO ═══════════════════════════════════════ -->
     <div id="pantalla-host-monitoreo" class="pantalla">
       <div class="tarjeta" style="text-align:center;gap:6px;display:flex;flex-direction:column;">
         <h2 style="text-align:center;">⏳ Esperando números...</h2>
@@ -926,7 +919,6 @@
       </div>
     </div>
 
-    <!-- ══ UNIRSE ═══════════════════════════════════════════════ -->
     <div id="pantalla-unirse" class="pantalla">
       <div class="tarjeta" style="text-align:center;gap:8px;display:flex;flex-direction:column;">
         <div class="deco">🍺</div>
@@ -947,7 +939,6 @@
       </div>
     </div>
 
-    <!-- ══ CONFIRMACIÓN REGISTRO ════════════════════════════════ -->
     <div id="pantalla-participante-confirmado" class="pantalla">
       <div class="tarjeta" style="text-align:center;padding:36px 20px;gap:12px;display:flex;flex-direction:column;">
         <div class="check-grande">✅</div>
@@ -965,7 +956,6 @@
       </div>
     </div>
 
-    <!-- ══ INGRESO NÚMERO ═══════════════════════════════════════ -->
     <div id="pantalla-ingreso-numero" class="pantalla">
       <div class="banner-info">
         <span style="font-size:1.2rem;">🔒</span>
@@ -983,7 +973,6 @@
       </div>
     </div>
 
-    <!-- ══ NÚMERO GUARDADO ══════════════════════════════════════ -->
     <div id="pantalla-numero-guardado" class="pantalla">
       <div class="tarjeta" style="text-align:center;padding:40px 20px;gap:16px;display:flex;flex-direction:column;">
         <div style="font-size:4rem;">✅</div>
@@ -994,7 +983,6 @@
       </div>
     </div>
 
-    <!-- ══ RESULTADOS ═══════════════════════════════════════════ -->
     <div id="pantalla-resultados" class="pantalla">
       <div class="tarjeta" style="text-align:center;">
         <h2 style="text-align:center;font-size:2rem;">¡Resultados! 🎲</h2>
