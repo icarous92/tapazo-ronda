@@ -555,6 +555,7 @@
       document.getElementById('btn-login-admin')?.addEventListener('click', loginAdmin);
       document.getElementById('btn-cerrar-admin')?.addEventListener('click', cerrarSesionAdmin);
       document.getElementById('btn-back-inicio')?.addEventListener('click', () => mostrar('inicio'));
+	  document.getElementById('btn-crear-sala')?.addEventListener('click', crearSala);
       document.getElementById('admin-usuario')?.addEventListener('keydown', e => {
         if (e.key === 'Enter') document.getElementById('admin-celular')?.focus();
       });
@@ -865,7 +866,7 @@
 		  <div>
 			<div class="campo-label">💜 Nequi para pagos (Host)</div>
 			<input type="tel" id="input-nequi-host" placeholder="Ej: 3001234567" maxlength="15" inputmode="numeric" />
-			<div id="error-nequi" class="mensaje-error"></div>
+			<div id="error-nequi" class="mensaje-error"></div> 
 		  </div>
 		  <button id="btn-crear-sala" class="btn btn-amarillo">Crear y Abrir Sala</button>
 		</div>
