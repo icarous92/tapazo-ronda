@@ -23,6 +23,7 @@
     const app = initializeApp(firebaseConfig);
     const db  = getDatabase(app);
 
+    // ─── Helpers ───────────────────────────────────────────────
     function uid(len = 6) { return Math.random().toString(36).substring(2, 2 + len).toUpperCase(); }
     function escaparHTML(str) {
       return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
@@ -30,6 +31,12 @@
     function salaRef(id)               { return ref(db, `salas/${id}`); }
     function jugadoresRef(id)          { return ref(db, `salas/${id}/jugadores`); }
     function jugadorRef(salaId, jugId) { return ref(db, `salas/${salaId}/jugadores/${jugId}`); }
+
+    // ── NUEVO: Validación de número celular ──────────────────────
+    function validarCelular(num) {
+      const limpio = num.replace(/\D/g, '');
+      return limpio.length >= 10 ? limpio : null;
+    }
 
     let miSalaId = null, miJugadorId = null, soyHost = false, unsub = null;
 
@@ -44,29 +51,54 @@
       document.getElementById('pantalla-' + id)?.classList.add('activa');
     }
 
+    // ─── MODIFICADO: crearSala ahora pide número Nequi ────────────
     async function crearSala() {
+      const nequi = document.getElementById('input-nequi-host').value.trim();
+      const errNequi = document.getElementById('error-nequi');
+      const celularValido = validarCelular(nequi);
+      if (!celularValido) {
+        errNequi.textContent = '⚠️ Ingresa un número Nequi válido (mín. 10 dígitos).';
+        errNequi.classList.add('visible');
+        document.getElementById('input-nequi-host').focus();
+        return;
+      }
+      errNequi.classList.remove('visible');
+
       const salaId = uid(6);
       setURLSala(salaId);
-      await set(salaRef(salaId), { fase: 'esperando', creadaEn: Date.now() });
+      await set(salaRef(salaId), { fase: 'esperando', creadaEn: Date.now(), nequiHost: celularValido });
       miSalaId = salaId; soyHost = true;
       document.getElementById('link-sala').value = window.location.href;
       mostrar('host-espera');
       escucharSala(salaId, renderHostEspera);
     }
 
-    async function unirseASala(salaId, nombre) {
+    // ─── MODIFICADO: unirseASala ahora recibe también celular ─────
+    async function unirseASala(salaId, nombre, celular) {
       const snap = await get(salaRef(salaId));
       if (!snap.exists()) { mostrarError('error-unirse', '❌ La sala no existe o ya expiró.'); return; }
       const data = snap.val();
       if (data.fase === 'resultados') { mostrarError('error-unirse', '❌ El juego ya terminó.'); return; }
       const jugadores = data.jugadores || {};
+
       if (Object.values(jugadores).some(j => j.nombre.toLowerCase() === nombre.toLowerCase())) {
         mostrarError('error-unirse', '⚠️ Ese nombre ya está en uso.'); return;
       }
+      // NUEVO: validar duplicado de celular
+      if (Object.values(jugadores).some(j => j.celular === celular)) {
+        mostrarError('error-unirse', '⚠️ Ese número de celular ya está registrado en esta sala.'); return;
+      }
+
       const nuevoRef = push(jugadoresRef(salaId));
       miJugadorId = nuevoRef.key; miSalaId = salaId;
-      await set(nuevoRef, { nombre, numero: null, registradoEn: Date.now() });
-      localStorage.setItem('tapazo_jugador', JSON.stringify({ salaId, jugadorId: miJugadorId, nombre }));
+      // NUEVO: guarda celular en Firebase
+      await set(nuevoRef, { nombre, celular, numero: null, pagado: false, registradoEn: Date.now() });
+      localStorage.setItem('tapazo_jugador', JSON.stringify({ salaId, jugadorId: miJugadorId, nombre, celular }));
+
+      // NUEVO: mostrar número Nequi del host al participante
+      if (data.nequiHost) {
+        mostrarBannerNequi(data.nequiHost);
+      }
 
       if (data.fase === 'jugando') {
         mostrar('ingreso-numero');
@@ -83,6 +115,14 @@
           if (d.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaId); }
         });
       }
+    }
+
+    // NUEVO: Banner de Nequi para participante
+    function mostrarBannerNequi(nequi) {
+      document.querySelectorAll('.banner-nequi-participante').forEach(el => {
+        el.style.display = 'flex';
+        el.querySelector('.nequi-numero').textContent = nequi;
+      });
     }
 
     function escucharSala(salaId, cb) {
@@ -133,24 +173,87 @@
       mostrar('numero-guardado');
     }
 
+    // ─── MODIFICADO: cargarYMostrarResultados añade panel de pagos ─
     async function cargarYMostrarResultados(salaId) {
       const snap = await get(jugadoresRef(salaId));
       if (!snap.exists()) return;
-      const jugadores = Object.values(snap.val()).filter(j => j.numero !== null);
+      const snapSala = await get(salaRef(salaId));
+      const nequiHost = snapSala.exists() ? snapSala.val().nequiHost : null;
+
+      const jugadoresRaw = snap.val();
+      const jugadores = Object.entries(jugadoresRaw)
+        .filter(([, j]) => j.numero !== null)
+        .map(([id, j]) => ({ ...j, _id: id }));
       if (jugadores.length === 0) return;
+
       const ganador  = jugadores.reduce((max, j) => j.numero > max.numero ? j : max, jugadores[0]);
       const perdedor = jugadores.reduce((min, j) => j.numero < min.numero ? j : min, jugadores[0]);
+
       document.getElementById('res-ganador-nombre').textContent  = ganador.nombre;
       document.getElementById('res-ganador-num').textContent     = ganador.numero;
       document.getElementById('res-perdedor-nombre').textContent = perdedor.nombre;
       document.getElementById('res-perdedor-num').textContent    = perdedor.numero;
+
       document.getElementById('lista-resultados').innerHTML = [...jugadores].sort((a,b) => b.numero - a.numero).map((j,i) => {
         const esG = j.nombre === ganador.nombre && j.numero === ganador.numero;
         const esP = j.nombre === perdedor.nombre && j.numero === perdedor.numero;
         return `<div class="item-participante"><span>${esG?'🏆':esP?'😅':'#'+(i+1)} ${escaparHTML(j.nombre)}</span><span class="num-badge">${j.numero}</span></div>`;
       }).join('');
+
+      // NUEVO: Banner Nequi en resultados (participante)
+      const bannerNequi = document.getElementById('banner-nequi-resultados');
+      if (!soyHost && nequiHost) {
+        bannerNequi.style.display = 'flex';
+        document.getElementById('nequi-resultados-num').textContent = nequiHost;
+      } else {
+        bannerNequi.style.display = 'none';
+      }
+
+      // NUEVO: Panel de pagos (solo host)
+      const panelPagos = document.getElementById('panel-pagos-host');
+      if (soyHost) {
+        panelPagos.style.display = 'flex';
+        renderPanelPagos(salaId, jugadoresRaw);
+        // Escuchar cambios de pago en tiempo real
+        escucharSala(salaId, data => {
+          if (data.jugadores) renderPanelPagos(salaId, data.jugadores);
+        });
+      } else {
+        panelPagos.style.display = 'none';
+      }
+
       mostrar('resultados');
     }
+
+    // NUEVO: Renderiza la lista de pagos del panel del host
+    function renderPanelPagos(salaId, jugadoresObj) {
+      const lista = document.getElementById('lista-pagos');
+      const jugadores = Object.entries(jugadoresObj)
+        .filter(([, j]) => j.numero !== null)
+        .map(([id, j]) => ({ ...j, _id: id }));
+
+      lista.innerHTML = jugadores.map(j => {
+        const pagado = j.pagado === true;
+        return `
+          <div class="item-participante item-pago" data-jugid="${escaparHTML(j._id)}">
+            <div style="display:flex;flex-direction:column;gap:2px;">
+              <span style="font-weight:700;">👤 ${escaparHTML(j.nombre)}</span>
+              ${j.celular ? `<span style="font-size:0.78rem;color:rgba(255,255,255,0.4);">📱 ${escaparHTML(j.celular)}</span>` : ''}
+            </div>
+            <button
+              class="btn-pago ${pagado ? 'btn-pago-si' : 'btn-pago-no'}"
+              onclick="window._togglePago('${escaparHTML(salaId)}', '${escaparHTML(j._id)}', ${pagado})"
+            >
+              ${pagado ? '✅ Pagó' : '❌ No pagó'}
+            </button>
+          </div>`;
+      }).join('');
+    }
+
+    // NUEVO: Toggle pago — expuesto en window para uso desde onclick inline
+    window._togglePago = async function(salaId, jugId, estadoActual) {
+      await update(jugadorRef(salaId, jugId), { pagado: !estadoActual });
+    };
 
     function nuevoJuego() {
       localStorage.removeItem('tapazo_jugador');
@@ -167,6 +270,7 @@
       setTimeout(() => el.classList.remove('visible'), 4000);
     }
 
+    // ─── DOMContentLoaded ─────────────────────────────────────────
     window.addEventListener('DOMContentLoaded', async () => {
       const salaEnURL = getSalaDeURL();
 
@@ -177,6 +281,10 @@
           const snap = await get(salaRef(salaEnURL));
           if (snap.exists()) {
             const data    = snap.val();
+
+            // NUEVO: restaurar banner Nequi si hay sesión guardada
+            if (data.nequiHost) mostrarBannerNequi(data.nequiHost);
+
             const jugSnap = await get(jugadorRef(salaEnURL, guardado.jugadorId));
             if (jugSnap.exists() && jugSnap.val().numero !== null) {
               mostrar('numero-guardado');
@@ -203,17 +311,28 @@
         mostrar('inicio');
       }
 
+      // Botón crear sala
       document.getElementById('btn-crear-sala').addEventListener('click', crearSala);
+      document.getElementById('input-nequi-host').addEventListener('keydown', e => { if (e.key === 'Enter') crearSala(); });
+
       document.getElementById('btn-iniciar-juego').addEventListener('click', iniciarJuego);
       document.getElementById('btn-guardar-numero').addEventListener('click', guardarMiNumero);
       document.getElementById('btn-nuevo-juego').addEventListener('click', nuevoJuego);
+
+      // MODIFICADO: btn-unirse ahora valida nombre + celular
       document.getElementById('btn-unirse').addEventListener('click', async () => {
-        const nombre = document.getElementById('input-nombre-unirse').value.trim();
+        const nombre  = document.getElementById('input-nombre-unirse').value.trim();
+        const celular = document.getElementById('input-celular-unirse').value.trim();
         if (!nombre) { mostrarError('error-unirse', '⚠️ Escribe tu nombre.'); return; }
-        await unirseASala(salaEnURL, nombre);
+        const celularValido = validarCelular(celular);
+        if (!celularValido) { mostrarError('error-unirse', '⚠️ Ingresa un número de celular válido (mín. 10 dígitos).'); return; }
+        await unirseASala(salaEnURL, nombre, celularValido);
       });
-      document.getElementById('input-nombre-unirse')?.addEventListener('keydown', e => { if (e.key==='Enter') document.getElementById('btn-unirse').click(); });
+
+      document.getElementById('input-nombre-unirse')?.addEventListener('keydown', e => { if (e.key==='Enter') document.getElementById('input-celular-unirse').focus(); });
+      document.getElementById('input-celular-unirse')?.addEventListener('keydown', e => { if (e.key==='Enter') document.getElementById('btn-unirse').click(); });
       document.getElementById('input-numero')?.addEventListener('keydown', e => { if (e.key==='Enter') guardarMiNumero(); });
+
       document.getElementById('btn-copiar-link').addEventListener('click', () => {
         navigator.clipboard.writeText(document.getElementById('link-sala').value).then(() => {
           const btn = document.getElementById('btn-copiar-link');
@@ -235,6 +354,7 @@
       --amarillo:#f9a825; --rojo:#c62828; --rojo-hover:#8e0000;
       --negro:#1a1a1a; --gris-oscuro:#2c2c2c; --blanco:#fafafa;
       --sombra:0 4px 20px rgba(0,0,0,0.25); --radio:16px;
+      --nequi:#6c0bad;
     }
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     body{font-family:'Nunito',sans-serif;background:var(--negro);color:var(--blanco);min-height:100dvh;display:flex;flex-direction:column;align-items:center;padding:0 0 48px;background-image:repeating-linear-gradient(45deg,transparent,transparent 2px,rgba(255,255,255,0.015) 2px,rgba(255,255,255,0.015) 4px)}
@@ -248,7 +368,7 @@
     .tarjeta{background:var(--gris-oscuro);border-radius:var(--radio);padding:24px 20px;box-shadow:var(--sombra);border:1px solid rgba(255,255,255,0.07)}
     .tarjeta h2{font-family:'Bebas Neue',sans-serif;font-size:1.7rem;letter-spacing:1.5px;color:var(--verde-claro);margin-bottom:6px}
     .tarjeta p{color:rgba(255,255,255,0.65);font-size:0.95rem;line-height:1.5}
-    input[type="text"],input[type="number"]{width:100%;padding:16px 18px;font-size:1.15rem;font-family:'Nunito',sans-serif;font-weight:700;border-radius:12px;border:2px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.07);color:#fff;outline:none;transition:border-color 0.2s,background 0.2s;-webkit-appearance:none}
+    input[type="text"],input[type="number"],input[type="tel"]{width:100%;padding:16px 18px;font-size:1.15rem;font-family:'Nunito',sans-serif;font-weight:700;border-radius:12px;border:2px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.07);color:#fff;outline:none;transition:border-color 0.2s,background 0.2s;-webkit-appearance:none}
     input::placeholder{color:rgba(255,255,255,0.35);font-weight:400}
     input:focus{border-color:var(--verde-claro);background:rgba(76,175,80,0.1)}
     .input-grande{font-size:2.8rem!important;text-align:center;padding:24px 18px!important;letter-spacing:2px}
@@ -296,6 +416,30 @@
     .stat-label{font-size:0.75rem;color:rgba(255,255,255,0.45);margin-top:2px}
     .spinner{display:inline-block;width:28px;height:28px;border:3px solid rgba(76,175,80,0.25);border-top-color:var(--verde-claro);border-radius:50%;animation:spin 0.9s linear infinite;margin-bottom:10px}
     @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* ── NUEVO: Estilos Nequi ── */
+    .banner-nequi{background:linear-gradient(135deg,rgba(108,11,173,0.25),rgba(108,11,173,0.1));border:1.5px solid rgba(108,11,173,0.5);border-radius:14px;padding:14px 18px;display:flex;align-items:center;gap:12px}
+    .banner-nequi .nequi-icon{font-size:1.6rem;flex-shrink:0}
+    .banner-nequi .nequi-info{display:flex;flex-direction:column;gap:2px}
+    .banner-nequi .nequi-label{font-size:0.75rem;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px}
+    .banner-nequi .nequi-numero{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;color:#d98fff;letter-spacing:2px}
+
+    /* ── NUEVO: Panel de pagos ── */
+    .panel-pagos{display:flex;flex-direction:column;gap:12px}
+    .panel-pagos-titulo{display:flex;align-items:center;gap:8px;font-family:'Bebas Neue',sans-serif;font-size:1.3rem;letter-spacing:2px;color:rgba(255,255,255,0.5)}
+    .lista-pagos{display:flex;flex-direction:column;gap:8px;max-height:300px;overflow-y:auto;padding-right:4px}
+    .lista-pagos::-webkit-scrollbar{width:4px}
+    .lista-pagos::-webkit-scrollbar-thumb{background:var(--verde);border-radius:4px}
+    .item-pago{align-items:center}
+    .btn-pago{border:none;border-radius:10px;padding:8px 14px;font-family:'Nunito',sans-serif;font-weight:900;font-size:0.85rem;cursor:pointer;transition:background 0.15s,transform 0.1s;white-space:nowrap;-webkit-tap-highlight-color:transparent}
+    .btn-pago:active{transform:scale(0.95)}
+    .btn-pago-no{background:rgba(198,40,40,0.25);color:#ef5350;border:1.5px solid rgba(239,83,80,0.4)}
+    .btn-pago-no:hover{background:rgba(198,40,40,0.4)}
+    .btn-pago-si{background:rgba(76,175,80,0.25);color:var(--verde-claro);border:1.5px solid rgba(76,175,80,0.4)}
+    .btn-pago-si:hover{background:rgba(76,175,80,0.4)}
+
+    /* ── NUEVO: Input label ── */
+    .campo-label{font-size:0.82rem;color:rgba(255,255,255,0.45);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px}
   </style>
 </head>
 <body>
@@ -307,15 +451,22 @@
 
   <div class="contenedor">
 
+    <!-- ── PANTALLA INICIO (MODIFICADA: + campo Nequi) ── -->
     <div id="pantalla-inicio" class="pantalla">
       <div class="tarjeta" style="text-align:center;padding:32px 20px;">
         <div class="deco">🍺🎲🍺</div>
         <h2 style="text-align:center;margin-top:12px;">¡Bienvenido!</h2>
         <p style="margin-top:8px;">Crea una sala, comparte el link y cada quien ingresa su número desde su propio celular.</p>
       </div>
+      <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
+        <div class="campo-label">💜 Tu número Nequi (para recibir pagos)</div>
+        <input type="tel" id="input-nequi-host" placeholder="Ej: 3001234567" maxlength="15" inputmode="numeric" />
+        <div id="error-nequi" class="mensaje-error"></div>
+      </div>
       <button id="btn-crear-sala" class="btn btn-verde">🎮 Crear nueva sala</button>
     </div>
 
+    <!-- ── PANTALLA HOST ESPERA (sin cambios) ── -->
     <div id="pantalla-host-espera" class="pantalla">
       <div class="tarjeta" style="text-align:center;gap:10px;display:flex;flex-direction:column;">
         <h2 style="text-align:center;">🔗 Comparte el link</h2>
@@ -339,6 +490,7 @@
       <p style="text-align:center;font-size:0.8rem;color:rgba(255,255,255,0.3);">Mínimo 2 participantes para iniciar</p>
     </div>
 
+    <!-- ── PANTALLA HOST MONITOREO (sin cambios) ── -->
     <div id="pantalla-host-monitoreo" class="pantalla">
       <div class="tarjeta" style="text-align:center;gap:6px;display:flex;flex-direction:column;">
         <h2 style="text-align:center;">⏳ Esperando números...</h2>
@@ -355,6 +507,7 @@
       </div>
     </div>
 
+    <!-- ── PANTALLA UNIRSE (MODIFICADA: + campo celular) ── -->
     <div id="pantalla-unirse" class="pantalla">
       <div class="tarjeta" style="text-align:center;gap:8px;display:flex;flex-direction:column;">
         <div class="deco">🍺</div>
@@ -362,14 +515,29 @@
         <p>Sala: <strong id="sala-id-display" style="color:var(--verde-claro);font-family:monospace;"></strong></p>
       </div>
       <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
-        <p style="color:rgba(255,255,255,0.65);">¿Cómo te llamas?</p>
-        <input type="text" id="input-nombre-unirse" placeholder="Tu nombre..." maxlength="30" />
+        <div>
+          <div class="campo-label">👤 Tu nombre</div>
+          <input type="text" id="input-nombre-unirse" placeholder="Ej: Juan..." maxlength="30" />
+        </div>
+        <div>
+          <div class="campo-label">📱 Tu número de celular</div>
+          <input type="tel" id="input-celular-unirse" placeholder="Ej: 3001234567" maxlength="15" inputmode="numeric" />
+        </div>
         <div id="error-unirse" class="mensaje-error"></div>
         <button id="btn-unirse" class="btn btn-verde">✅ Unirme a la sala</button>
       </div>
     </div>
 
+    <!-- ── PANTALLA PARTICIPANTE ESPERA (MODIFICADA: + banner Nequi oculto) ── -->
     <div id="pantalla-participante-espera" class="pantalla">
+      <!-- NUEVO: Banner Nequi (oculto por defecto, se muestra si hay nequiHost) -->
+      <div class="banner-nequi banner-nequi-participante" style="display:none;">
+        <div class="nequi-icon">💜</div>
+        <div class="nequi-info">
+          <div class="nequi-label">Paga tu botella por Nequi a:</div>
+          <div class="nequi-numero">— <span class="nequi-numero"></span></div>
+        </div>
+      </div>
       <div class="tarjeta" style="text-align:center;padding:32px 20px;gap:16px;display:flex;flex-direction:column;">
         <div class="spinner" style="margin:0 auto;"></div>
         <h2 style="text-align:center;">¡Ya estás dentro! 🎉</h2>
@@ -378,7 +546,16 @@
       </div>
     </div>
 
+    <!-- ── PANTALLA INGRESO NÚMERO (MODIFICADA: + banner Nequi oculto) ── -->
     <div id="pantalla-ingreso-numero" class="pantalla">
+      <!-- NUEVO: Banner Nequi (oculto por defecto) -->
+      <div class="banner-nequi banner-nequi-participante" style="display:none;">
+        <div class="nequi-icon">💜</div>
+        <div class="nequi-info">
+          <div class="nequi-label">Paga tu botella por Nequi a:</div>
+          <div class="nequi-numero nequi-numero"></div>
+        </div>
+      </div>
       <div class="banner-info">
         <span style="font-size:1.2rem;">🔒</span>
         <span><strong>Privado.</strong> Solo tú ves tu número antes de que se revelen los resultados.</span>
@@ -395,6 +572,7 @@
       </div>
     </div>
 
+    <!-- ── PANTALLA NÚMERO GUARDADO (sin cambios) ── -->
     <div id="pantalla-numero-guardado" class="pantalla">
       <div class="tarjeta" style="text-align:center;padding:40px 20px;gap:16px;display:flex;flex-direction:column;">
         <div style="font-size:4rem;">✅</div>
@@ -405,6 +583,7 @@
       </div>
     </div>
 
+    <!-- ── PANTALLA RESULTADOS (MODIFICADA: + banner Nequi + panel pagos) ── -->
     <div id="pantalla-resultados" class="pantalla">
       <div class="tarjeta" style="text-align:center;">
         <h2 style="text-align:center;font-size:2rem;">¡Resultados! 🎲</h2>
@@ -421,10 +600,31 @@
         <div class="resultado-nombre" id="res-perdedor-nombre">—</div>
         <div class="resultado-numero" id="res-perdedor-num">—</div>
       </div>
+
+      <!-- NUEVO: Banner Nequi en resultados (solo participantes) -->
+      <div id="banner-nequi-resultados" class="banner-nequi" style="display:none;">
+        <div class="nequi-icon">💜</div>
+        <div class="nequi-info">
+          <div class="nequi-label">¿Perdiste? Paga tu botella por Nequi al:</div>
+          <div class="nequi-numero" id="nequi-resultados-num">—</div>
+        </div>
+      </div>
+
       <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
         <p class="seccion-titulo">Todos los resultados</p>
         <div id="lista-resultados" class="lista-participantes" style="max-height:320px;"></div>
       </div>
+
+      <!-- NUEVO: Panel de pagos del host -->
+      <div id="panel-pagos-host" class="tarjeta panel-pagos" style="display:none;">
+        <div class="panel-pagos-titulo">
+          <span>💳</span>
+          <span>Control de pagos</span>
+        </div>
+        <p style="font-size:0.82rem;color:rgba(255,255,255,0.4);margin-top:-4px;">Marca quién ya te pagó la botella</p>
+        <div id="lista-pagos" class="lista-pagos"></div>
+      </div>
+
       <button id="btn-nuevo-juego" class="btn btn-rojo">🔄 Nueva ronda</button>
     </div>
 
