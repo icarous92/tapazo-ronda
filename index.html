@@ -1,0 +1,866 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Tapazo por Número 🍺</title>
+
+  <link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Nunito:wght@400;600;700;900&display=swap" rel="stylesheet" />
+
+  <!-- Firebase SDKs -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+    import {
+      getDatabase, ref, set, get, push, onValue, update, remove
+    } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js";
+
+    // =====================================================
+    // 🔧 CONFIGURA AQUÍ TU PROYECTO DE FIREBASE
+    // =====================================================
+    // 1. Ve a https://console.firebase.google.com/
+    // 2. Crea un proyecto → Realtime Database → Reglas: true/true (para pruebas)
+    // 3. Ve a Configuración del proyecto → Agrega app web
+    // 4. Copia los valores y pégalos aquí abajo:
+    // =====================================================
+    // Import the functions you need from the SDKs you need	
+	const firebaseConfig = {
+	  apiKey: "AIzaSyA5rpfCwEu51bX9v8muSD6Nwo_ll1Oo_PI",
+	  authDomain: "tapazo-ronda.firebaseapp.com",
+	  databaseURL: "https://tapazo-ronda-default-rtdb.firebaseio.com",
+	  projectId: "tapazo-ronda",
+	  storageBucket: "tapazo-ronda.firebasestorage.app",
+	  messagingSenderId: "921665345411",
+	  appId: "1:921665345411:web:19d9917d1302d1ad0348b6",
+	  measurementId: "G-QD2NJMC4FB"
+	};
+
+	// Initialize Firebase
+	const app = initializeApp(firebaseConfig);
+	const analytics = getAnalytics(app);
+    // =====================================================
+
+    const app = initializeApp(firebaseConfig);
+    const db  = getDatabase(app);
+
+    // ─── Utilidades ──────────────────────────────────────
+    function uid(len = 6) {
+      return Math.random().toString(36).substring(2, 2 + len).toUpperCase();
+    }
+
+    function escaparHTML(str) {
+      return String(str)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    // ─── Referencia a sala ────────────────────────────────
+    function salaRef(salaId)    { return ref(db, `salas/${salaId}`); }
+    function jugadoresRef(id)   { return ref(db, `salas/${id}/jugadores`); }
+    function faseRef(id)        { return ref(db, `salas/${id}/fase`); }
+    function jugadorRef(salaId, jugadorId) {
+      return ref(db, `salas/${salaId}/jugadores/${jugadorId}`);
+    }
+
+    // ─── Estado local ─────────────────────────────────────
+    let miSalaId    = null;
+    let miJugadorId = null;
+    let soyHost     = false;
+    let unsub       = null; // listener activo
+
+    // ─── Detección por URL ────────────────────────────────
+    function getSalaDeURL() {
+      const p = new URLSearchParams(window.location.search);
+      return p.get('sala') || null;
+    }
+
+    function setURLSala(salaId) {
+      const url = new URL(window.location.href);
+      url.searchParams.set('sala', salaId);
+      window.history.replaceState({}, '', url.toString());
+    }
+
+    // ─── Pantallas ────────────────────────────────────────
+    function mostrar(id) {
+      document.querySelectorAll('.pantalla').forEach(p => p.classList.remove('activa'));
+      document.getElementById('pantalla-' + id)?.classList.add('activa');
+    }
+
+    // ─── Crear sala (HOST) ────────────────────────────────
+    async function crearSala() {
+      const salaId = uid(6);
+      setURLSala(salaId);
+      await set(salaRef(salaId), {
+        fase: 'esperando',   // esperando | jugando | resultados
+        creadaEn: Date.now()
+      });
+      miSalaId = salaId;
+      soyHost  = true;
+      document.getElementById('link-sala').value = window.location.href;
+      mostrar('host-espera');
+      escucharSala(salaId, renderHostEspera);
+    }
+
+    // ─── Unirse a sala (PARTICIPANTE) ─────────────────────
+    async function unirseASala(salaId, nombre) {
+      const snap = await get(salaRef(salaId));
+      if (!snap.exists()) {
+        mostrarError('error-unirse', '❌ La sala no existe o ya expiró.');
+        return;
+      }
+      const data = snap.val();
+      if (data.fase === 'resultados') {
+        mostrarError('error-unirse', '❌ El juego ya terminó.');
+        return;
+      }
+
+      // Verificar nombre duplicado
+      const jugadores = data.jugadores || {};
+      const duplicado = Object.values(jugadores).some(
+        j => j.nombre.toLowerCase() === nombre.toLowerCase()
+      );
+      if (duplicado) {
+        mostrarError('error-unirse', '⚠️ Ese nombre ya está en uso.');
+        return;
+      }
+
+      const nuevoRef = push(jugadoresRef(salaId));
+      miJugadorId    = nuevoRef.key;
+      miSalaId       = salaId;
+      await set(nuevoRef, { nombre, numero: null, registradoEn: Date.now() });
+
+      localStorage.setItem('tapazo_jugador', JSON.stringify({ salaId, jugadorId: miJugadorId, nombre }));
+
+      if (data.fase === 'jugando') {
+        // Se unió tarde (fase en curso) → ir directo a ingresar número
+        mostrar('ingreso-numero');
+        document.getElementById('nombre-turno').textContent = nombre;
+        escucharSala(salaId, (d) => {
+          if (d.fase === 'resultados') {
+            detenerEscucha();
+            cargarYMostrarResultados(salaId);
+          }
+        });
+      } else {
+        mostrar('participante-espera');
+        escucharSala(salaId, (d) => {
+          if (d.fase === 'jugando') {
+            detenerEscucha();
+            mostrar('ingreso-numero');
+            document.getElementById('nombre-turno').textContent = nombre;
+            escucharSala(salaId, (d2) => {
+              if (d2.fase === 'resultados') {
+                detenerEscucha();
+                cargarYMostrarResultados(salaId);
+              }
+            });
+          }
+          if (d.fase === 'resultados') {
+            detenerEscucha();
+            cargarYMostrarResultados(salaId);
+          }
+        });
+      }
+    }
+
+    // ─── Escuchar sala en tiempo real ─────────────────────
+    function escucharSala(salaId, callback) {
+      detenerEscucha();
+      const r = salaRef(salaId);
+      unsub = onValue(r, snap => {
+        if (snap.exists()) callback(snap.val());
+      });
+    }
+
+    function detenerEscucha() {
+      // Firebase v10: onValue devuelve función unsubscribe
+      if (typeof unsub === 'function') { unsub(); unsub = null; }
+    }
+
+    // ─── Render espera del HOST ───────────────────────────
+    function renderHostEspera(data) {
+      const jugadores = data.jugadores ? Object.values(data.jugadores) : [];
+      const lista = document.getElementById('lista-espera');
+      const btn   = document.getElementById('btn-iniciar-juego');
+
+      if (jugadores.length === 0) {
+        lista.innerHTML = '<p class="estado-vacio">Nadie se ha unido aún 🤷</p>';
+      } else {
+        lista.innerHTML = jugadores.map(j => `
+          <div class="item-participante">
+            <span>👤 ${escaparHTML(j.nombre)}</span>
+            <span class="badge-verde">✓ Listo</span>
+          </div>
+        `).join('');
+      }
+
+      document.getElementById('contador-espera').textContent =
+        jugadores.length === 1 ? '1 persona' : `${jugadores.length} personas`;
+
+      btn.disabled = jugadores.length < 2;
+
+      if (data.fase === 'jugando') {
+        detenerEscucha();
+        mostrar('host-monitoreo');
+        escucharSala(miSalaId, renderHostMonitoreo);
+      }
+      if (data.fase === 'resultados') {
+        detenerEscucha();
+        cargarYMostrarResultados(miSalaId);
+      }
+    }
+
+    // ─── Iniciar juego (HOST) ─────────────────────────────
+    async function iniciarJuego() {
+      await update(salaRef(miSalaId), { fase: 'jugando' });
+    }
+
+    // ─── Render monitoreo HOST ────────────────────────────
+    function renderHostMonitoreo(data) {
+      const jugadores = data.jugadores ? Object.values(data.jugadores) : [];
+      const pendientes = jugadores.filter(j => j.numero === null).length;
+      const listos    = jugadores.filter(j => j.numero !== null).length;
+
+      document.getElementById('monitor-pendientes').textContent = pendientes;
+      document.getElementById('monitor-listos').textContent    = listos;
+      document.getElementById('monitor-total').textContent     = jugadores.length;
+
+      const lista = document.getElementById('lista-monitoreo');
+      lista.innerHTML = jugadores.map(j => `
+        <div class="item-participante">
+          <span>👤 ${escaparHTML(j.nombre)}</span>
+          ${j.numero !== null
+            ? '<span class="badge-verde">✅ Listo</span>'
+            : '<span class="badge-pendiente">⏳ Pendiente</span>'}
+        </div>
+      `).join('');
+
+      // Todos ingresaron → revelar resultados automáticamente
+      if (jugadores.length >= 2 && jugadores.every(j => j.numero !== null)) {
+        detenerEscucha();
+        update(salaRef(miSalaId), { fase: 'resultados' });
+        cargarYMostrarResultados(miSalaId);
+      }
+    }
+
+    // ─── Guardar número del participante ─────────────────
+    async function guardarMiNumero() {
+      const campo   = document.getElementById('input-numero');
+      const valor   = campo.value.trim();
+      const errorEl = document.getElementById('error-numero');
+
+      if (valor === '' || !Number.isInteger(Number(valor)) || valor.includes('.')) {
+        errorEl.classList.add('visible');
+        campo.focus();
+        return;
+      }
+      errorEl.classList.remove('visible');
+
+      const numero = parseInt(valor, 10);
+      await update(jugadorRef(miSalaId, miJugadorId), { numero });
+
+      mostrar('numero-guardado');
+    }
+
+    // ─── Cargar y mostrar resultados ──────────────────────
+    async function cargarYMostrarResultados(salaId) {
+      const snap = await get(jugadoresRef(salaId));
+      if (!snap.exists()) return;
+
+      const jugadores = Object.values(snap.val()).filter(j => j.numero !== null);
+      if (jugadores.length === 0) return;
+
+      const ganador  = jugadores.reduce((max, j) => j.numero > max.numero ? j : max, jugadores[0]);
+      const perdedor = jugadores.reduce((min, j) => j.numero < min.numero ? j : min, jugadores[0]);
+
+      document.getElementById('res-ganador-nombre').textContent = ganador.nombre;
+      document.getElementById('res-ganador-num').textContent    = ganador.numero;
+      document.getElementById('res-perdedor-nombre').textContent = perdedor.nombre;
+      document.getElementById('res-perdedor-num').textContent    = perdedor.numero;
+
+      const ordenados = [...jugadores].sort((a, b) => b.numero - a.numero);
+      document.getElementById('lista-resultados').innerHTML = ordenados.map((j, i) => {
+        const esGanador  = j.nombre === ganador.nombre  && j.numero === ganador.numero;
+        const esPerdedor = j.nombre === perdedor.nombre && j.numero === perdedor.numero;
+        const icono = esGanador ? '🏆' : esPerdedor ? '😅' : `#${i + 1}`;
+        return `
+          <div class="item-participante">
+            <span>${icono} ${escaparHTML(j.nombre)}</span>
+            <span class="num-badge">${j.numero}</span>
+          </div>
+        `;
+      }).join('');
+
+      mostrar('resultados');
+    }
+
+    // ─── Nuevo juego ──────────────────────────────────────
+    function nuevoJuego() {
+      localStorage.removeItem('tapazo_jugador');
+      // Limpiar parámetro de URL
+      const url = new URL(window.location.href);
+      url.searchParams.delete('sala');
+      window.history.replaceState({}, '', url.toString());
+      miSalaId = null; miJugadorId = null; soyHost = false;
+      detenerEscucha();
+      mostrar('inicio');
+    }
+
+    // ─── Mostrar error ────────────────────────────────────
+    function mostrarError(id, msg) {
+      const el = document.getElementById(id);
+      el.textContent = msg;
+      el.classList.add('visible');
+      setTimeout(() => el.classList.remove('visible'), 4000);
+    }
+
+    // ─── Inicialización ───────────────────────────────────
+    window.addEventListener('DOMContentLoaded', async () => {
+      const salaEnURL = getSalaDeURL();
+
+      if (salaEnURL) {
+        // Verificar si ya teníamos sesión guardada para esta sala
+        const guardado = JSON.parse(localStorage.getItem('tapazo_jugador') || 'null');
+        if (guardado && guardado.salaId === salaEnURL && guardado.jugadorId) {
+          // Retomar sesión
+          miSalaId    = guardado.salaId;
+          miJugadorId = guardado.jugadorId;
+          const snap  = await get(salaRef(salaEnURL));
+          if (snap.exists()) {
+            const data = snap.val();
+            const jugSnap = await get(jugadorRef(salaEnURL, guardado.jugadorId));
+            if (jugSnap.exists() && jugSnap.val().numero !== null) {
+              // Ya ingresó número
+              mostrar('numero-guardado');
+              escucharSala(salaEnURL, (d) => {
+                if (d.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaEnURL); }
+              });
+            } else if (data.fase === 'jugando') {
+              mostrar('ingreso-numero');
+              document.getElementById('nombre-turno').textContent = guardado.nombre;
+              escucharSala(salaEnURL, (d) => {
+                if (d.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaEnURL); }
+              });
+            } else if (data.fase === 'resultados') {
+              cargarYMostrarResultados(salaEnURL);
+            } else {
+              mostrar('participante-espera');
+              escucharSala(salaEnURL, (d) => {
+                if (d.fase === 'jugando') { detenerEscucha(); mostrar('ingreso-numero'); document.getElementById('nombre-turno').textContent = guardado.nombre; }
+                if (d.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaEnURL); }
+              });
+            }
+            return;
+          }
+        }
+        // No hay sesión → mostrar pantalla de unirse
+        mostrar('unirse');
+        document.getElementById('sala-id-display').textContent = salaEnURL;
+      } else {
+        mostrar('inicio');
+      }
+
+      // ─── Eventos globales ──────────────────────────────
+      document.getElementById('btn-crear-sala').addEventListener('click', crearSala);
+
+      document.getElementById('btn-iniciar-juego').addEventListener('click', iniciarJuego);
+
+      document.getElementById('btn-unirse').addEventListener('click', async () => {
+        const nombre = document.getElementById('input-nombre-unirse').value.trim();
+        if (!nombre) { mostrarError('error-unirse', '⚠️ Escribe tu nombre.'); return; }
+        await unirseASala(salaEnURL, nombre);
+      });
+
+      document.getElementById('input-nombre-unirse')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') document.getElementById('btn-unirse').click();
+      });
+
+      document.getElementById('btn-guardar-numero').addEventListener('click', guardarMiNumero);
+
+      document.getElementById('input-numero')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') guardarMiNumero();
+      });
+
+      document.getElementById('btn-nuevo-juego').addEventListener('click', nuevoJuego);
+      document.getElementById('btn-nuevo-juego-2')?.addEventListener('click', nuevoJuego);
+
+      document.getElementById('btn-copiar-link').addEventListener('click', () => {
+        const link = document.getElementById('link-sala').value;
+        navigator.clipboard.writeText(link).then(() => {
+          const btn = document.getElementById('btn-copiar-link');
+          btn.textContent = '✅ ¡Copiado!';
+          setTimeout(() => btn.textContent = '📋 Copiar link', 2000);
+        });
+      });
+
+      document.getElementById('btn-copiar-link-2')?.addEventListener('click', () => {
+        const link = document.getElementById('link-sala-2').value;
+        navigator.clipboard.writeText(link).then(() => {
+          const btn = document.getElementById('btn-copiar-link-2');
+          btn.textContent = '✅ ¡Copiado!';
+          setTimeout(() => btn.textContent = '📋 Copiar link', 2000);
+        });
+      });
+
+      // Compartir nativo (si disponible)
+      document.getElementById('btn-compartir')?.addEventListener('click', () => {
+        const link = document.getElementById('link-sala').value;
+        if (navigator.share) {
+          navigator.share({ title: 'Tapazo por Número 🍺', text: '¡Únete a la ronda!', url: link });
+        } else {
+          document.getElementById('btn-copiar-link').click();
+        }
+      });
+
+      document.getElementById('btn-compartir-2')?.addEventListener('click', () => {
+        const link = document.getElementById('link-sala-2').value;
+        if (navigator.share) {
+          navigator.share({ title: 'Tapazo por Número 🍺', text: '¡Únete a la ronda!', url: link });
+        } else {
+          document.getElementById('btn-copiar-link-2').click();
+        }
+      });
+    });
+  </script>
+
+  <style>
+    :root {
+      --verde:        #2e7d32;
+      --verde-claro:  #4caf50;
+      --verde-hover:  #1b5e20;
+      --amarillo:     #f9a825;
+      --rojo:         #c62828;
+      --rojo-hover:   #8e0000;
+      --negro:        #1a1a1a;
+      --gris-oscuro:  #2c2c2c;
+      --gris-medio:   #5a5a5a;
+      --gris-claro:   #e8e8e8;
+      --blanco:       #fafafa;
+      --sombra:       0 4px 20px rgba(0,0,0,0.25);
+      --radio:        16px;
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Nunito', sans-serif;
+      background: var(--negro);
+      color: var(--blanco);
+      min-height: 100dvh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0 0 48px;
+      background-image: repeating-linear-gradient(
+        45deg, transparent, transparent 2px,
+        rgba(255,255,255,0.015) 2px, rgba(255,255,255,0.015) 4px
+      );
+    }
+
+    /* ── HEADER ── */
+    .app-header {
+      width: 100%;
+      background: var(--verde);
+      padding: 20px 24px 18px;
+      text-align: center;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    }
+    .app-header h1 { font-family: 'Bebas Neue', sans-serif; font-size: 2.4rem; letter-spacing: 2px; color:#fff; text-shadow: 2px 2px 6px rgba(0,0,0,0.4); }
+    .app-header p  { font-size: 0.85rem; color: rgba(255,255,255,0.8); margin-top: 2px; }
+
+    /* ── CONTENEDOR ── */
+    .contenedor { width:100%; max-width:480px; padding:24px 20px; }
+
+    /* ── PANTALLAS ── */
+    .pantalla { display:none; flex-direction:column; gap:16px; }
+    .pantalla.activa { display:flex; animation: fadeUp 0.3s ease; }
+    @keyframes fadeUp {
+      from { opacity:0; transform:translateY(12px); }
+      to   { opacity:1; transform:translateY(0); }
+    }
+
+    /* ── TARJETA ── */
+    .tarjeta {
+      background: var(--gris-oscuro);
+      border-radius: var(--radio);
+      padding: 24px 20px;
+      box-shadow: var(--sombra);
+      border: 1px solid rgba(255,255,255,0.07);
+    }
+    .tarjeta h2 { font-family:'Bebas Neue',sans-serif; font-size:1.7rem; letter-spacing:1.5px; color:var(--verde-claro); margin-bottom:6px; }
+    .tarjeta p  { color:rgba(255,255,255,0.65); font-size:0.95rem; line-height:1.5; }
+
+    /* ── INPUTS ── */
+    input[type="text"], input[type="number"] {
+      width:100%; padding:16px 18px; font-size:1.15rem;
+      font-family:'Nunito',sans-serif; font-weight:700;
+      border-radius:12px; border:2px solid rgba(255,255,255,0.12);
+      background:rgba(255,255,255,0.07); color:#fff; outline:none;
+      transition:border-color 0.2s,background 0.2s;
+      -webkit-appearance:none;
+    }
+    input::placeholder { color:rgba(255,255,255,0.35); font-weight:400; }
+    input:focus { border-color:var(--verde-claro); background:rgba(76,175,80,0.1); }
+    .input-grande { font-size:2.8rem!important; text-align:center; padding:24px 18px!important; letter-spacing:2px; }
+
+    /* Link de sala */
+    .input-link {
+      width:100%; padding:14px 16px; font-size:0.82rem;
+      font-family:monospace; font-weight:600;
+      border-radius:12px; border:1.5px solid rgba(76,175,80,0.4);
+      background:rgba(76,175,80,0.08); color:rgba(255,255,255,0.85);
+      outline:none; cursor:text;
+    }
+
+    /* ── BOTONES ── */
+    .btn {
+      display:block; width:100%; padding:18px 20px;
+      font-family:'Bebas Neue',sans-serif; font-size:1.5rem; letter-spacing:2px;
+      border:none; border-radius:14px; cursor:pointer;
+      transition:background 0.18s,transform 0.1s,box-shadow 0.18s;
+      text-align:center; -webkit-tap-highlight-color:transparent;
+    }
+    .btn:active { transform:scale(0.97); }
+    .btn:disabled { opacity:0.4; cursor:not-allowed; transform:none; }
+
+    .btn-verde    { background:var(--verde); color:#fff; box-shadow:0 6px 18px rgba(46,125,50,0.45); }
+    .btn-verde:hover:not(:disabled) { background:var(--verde-hover); }
+    .btn-amarillo { background:var(--amarillo); color:var(--negro); box-shadow:0 6px 18px rgba(249,168,37,0.4); }
+    .btn-rojo     { background:var(--rojo); color:#fff; box-shadow:0 6px 18px rgba(198,40,40,0.4); }
+    .btn-rojo:hover:not(:disabled) { background:var(--rojo-hover); }
+    .btn-secundario {
+      background:rgba(255,255,255,0.08); color:rgba(255,255,255,0.75);
+      border:1.5px solid rgba(255,255,255,0.15); font-size:1.15rem; padding:14px 20px;
+    }
+    .btn-secundario:hover { background:rgba(255,255,255,0.14); }
+    .btn-sm {
+      padding:12px 16px; font-size:1.1rem; border-radius:10px;
+    }
+
+    /* ── LISTA ── */
+    .lista-participantes {
+      display:flex; flex-direction:column; gap:8px;
+      max-height:260px; overflow-y:auto; padding-right:4px;
+    }
+    .lista-participantes::-webkit-scrollbar { width:4px; }
+    .lista-participantes::-webkit-scrollbar-thumb { background:var(--verde); border-radius:4px; }
+
+    .item-participante {
+      display:flex; align-items:center; justify-content:space-between;
+      background:rgba(255,255,255,0.05); border-radius:10px; padding:12px 16px;
+      border:1px solid rgba(255,255,255,0.07); animation:slideIn 0.25s ease;
+    }
+    @keyframes slideIn {
+      from { opacity:0; transform:translateY(-8px); }
+      to   { opacity:1; transform:translateY(0); }
+    }
+    .item-participante span { font-weight:700; font-size:1rem; }
+
+    .num-badge {
+      background:var(--verde); color:#fff; border-radius:8px;
+      padding:3px 12px; font-size:0.9rem; font-weight:900;
+      min-width:50px; text-align:center;
+    }
+    .badge-verde {
+      background:rgba(76,175,80,0.2); color:var(--verde-claro);
+      border:1px solid rgba(76,175,80,0.35); border-radius:8px;
+      padding:3px 10px; font-size:0.82rem; font-weight:700;
+    }
+    .badge-pendiente {
+      background:rgba(255,255,255,0.07); color:rgba(255,255,255,0.4);
+      border:1px solid rgba(255,255,255,0.1); border-radius:8px;
+      padding:3px 10px; font-size:0.82rem; font-weight:700;
+    }
+
+    /* ── CONTADOR ── */
+    .contador-tag {
+      display:inline-block; background:rgba(76,175,80,0.15);
+      border:1px solid rgba(76,175,80,0.35); color:var(--verde-claro);
+      border-radius:8px; padding:4px 12px; font-size:0.82rem; font-weight:700;
+    }
+
+    /* ── TURNO ── */
+    .turno-nombre { font-family:'Bebas Neue',sans-serif; font-size:2.5rem; color:#fff; letter-spacing:2px; line-height:1.1; text-align:center; }
+
+    /* ── RESULTADOS ── */
+    .resultado-ganador, .resultado-perdedor { border-radius:var(--radio); padding:22px 20px; text-align:center; }
+    .resultado-ganador { background:linear-gradient(135deg,#1b5e20,#2e7d32); border:2px solid rgba(76,175,80,0.5); }
+    .resultado-perdedor { background:linear-gradient(135deg,#8e0000,#c62828); border:2px solid rgba(239,83,80,0.4); }
+    .resultado-emoji  { font-size:3rem; margin-bottom:8px; }
+    .resultado-label  { font-family:'Bebas Neue',sans-serif; font-size:1.2rem; letter-spacing:2px; opacity:0.85; }
+    .resultado-nombre { font-family:'Bebas Neue',sans-serif; font-size:2.2rem; letter-spacing:1.5px; }
+    .resultado-numero { font-size:3.5rem; font-weight:900; line-height:1; }
+
+    .seccion-titulo { font-family:'Bebas Neue',sans-serif; font-size:1.3rem; letter-spacing:2px; color:rgba(255,255,255,0.5); text-transform:uppercase; }
+
+    /* ── ERRORES ── */
+    .mensaje-error {
+      background:rgba(198,40,40,0.2); border:1px solid rgba(239,83,80,0.4);
+      color:#ef5350; border-radius:10px; padding:12px 16px;
+      font-size:0.9rem; font-weight:700; display:none;
+    }
+    .mensaje-error.visible { display:block; }
+
+    hr { border:none; border-top:1px solid rgba(255,255,255,0.08); }
+    .estado-vacio { text-align:center; color:rgba(255,255,255,0.3); font-size:0.9rem; padding:16px 0; }
+    .deco { font-size:2.5rem; text-align:center; opacity:0.5; }
+
+    /* ── BANNER INFO ── */
+    .banner-info {
+      background:rgba(76,175,80,0.12); border:1px solid rgba(76,175,80,0.3);
+      border-radius:12px; padding:10px 16px;
+      display:flex; align-items:center; gap:10px;
+    }
+    .banner-info span { font-size:0.82rem; color:rgba(255,255,255,0.6); line-height:1.4; }
+    .banner-info strong { color:var(--verde-claro); }
+
+    /* ── MONITOR STATS ── */
+    .stats-row { display:flex; gap:12px; }
+    .stat-box {
+      flex:1; background:rgba(255,255,255,0.05); border-radius:12px;
+      padding:14px 10px; text-align:center;
+      border:1px solid rgba(255,255,255,0.07);
+    }
+    .stat-numero { font-family:'Bebas Neue',sans-serif; font-size:2.2rem; color:var(--verde-claro); }
+    .stat-label  { font-size:0.75rem; color:rgba(255,255,255,0.45); margin-top:2px; }
+
+    /* ── ESPERANDO SPINNER ── */
+    .spinner {
+      display:inline-block; width:28px; height:28px;
+      border:3px solid rgba(76,175,80,0.25);
+      border-top-color:var(--verde-claro);
+      border-radius:50%; animation:spin 0.9s linear infinite;
+      margin-bottom:10px;
+    }
+    @keyframes spin { to { transform:rotate(360deg); } }
+
+    /* ── NOTA CONFIGURACIÓN ── */
+    .nota-config {
+      background:rgba(249,168,37,0.12); border:1px solid rgba(249,168,37,0.35);
+      border-radius:12px; padding:14px 16px; font-size:0.82rem;
+      color:rgba(255,255,255,0.7); line-height:1.6;
+    }
+    .nota-config strong { color:var(--amarillo); display:block; margin-bottom:4px; }
+    .nota-config code { background:rgba(255,255,255,0.1); padding:1px 6px; border-radius:4px; font-size:0.8rem; }
+  </style>
+</head>
+<body>
+
+  <header class="app-header">
+    <h1>🍺 Tapazo por Número</h1>
+    <p>El más alto gana · El más bajo paga</p>
+  </header>
+
+  <div class="contenedor">
+
+    <!-- ════════════════════════════════════
+         PANTALLA: INICIO
+    ════════════════════════════════════ -->
+    <div id="pantalla-inicio" class="pantalla">
+
+      <div class="tarjeta" style="text-align:center; padding:32px 20px;">
+        <div class="deco">🍺🎲🍺</div>
+        <h2 style="text-align:center; margin-top:12px;">¡Bienvenido!</h2>
+        <p style="margin-top:8px;">Crea una sala, comparte el link y cada quien ingresa su número desde su propio celular.</p>
+      </div>
+
+      <div class="nota-config">
+        <strong>⚙️ Configuración requerida</strong>
+        Antes de usar, edita el archivo HTML y reemplaza los valores de <code>firebaseConfig</code> con los datos de tu proyecto en
+        <a href="https://console.firebase.google.com/" target="_blank" style="color:var(--amarillo);">Firebase Console</a>.
+        Activa <strong>Realtime Database</strong> y pon las reglas en <code>true</code> para pruebas.
+      </div>
+
+      <button id="btn-crear-sala" class="btn btn-verde">🎮 Crear nueva sala</button>
+
+    </div>
+
+
+    <!-- ════════════════════════════════════
+         PANTALLA: HOST — ESPERANDO JUGADORES
+    ════════════════════════════════════ -->
+    <div id="pantalla-host-espera" class="pantalla">
+
+      <div class="tarjeta" style="text-align:center; gap:10px; display:flex; flex-direction:column;">
+        <h2 style="text-align:center;">🔗 Comparte el link</h2>
+        <p>Que cada participante lo abra desde su celular y escriba su nombre.</p>
+        <input id="link-sala" class="input-link" type="text" readonly />
+        <div style="display:flex; gap:10px;">
+          <button id="btn-copiar-link" class="btn btn-secundario btn-sm" style="flex:1;">📋 Copiar link</button>
+          <button id="btn-compartir"   class="btn btn-verde btn-sm"     style="flex:1;">📤 Compartir</button>
+        </div>
+      </div>
+
+      <div class="tarjeta" style="gap:12px; display:flex; flex-direction:column;">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <h2 style="margin-bottom:0;">👥 En la sala</h2>
+          <span id="contador-espera" class="contador-tag">0 personas</span>
+        </div>
+        <div id="lista-espera" class="lista-participantes">
+          <p class="estado-vacio">Nadie se ha unido aún 🤷</p>
+        </div>
+      </div>
+
+      <button id="btn-iniciar-juego" class="btn btn-amarillo" disabled>
+        🎯 Iniciar juego
+      </button>
+      <p style="text-align:center; font-size:0.8rem; color:rgba(255,255,255,0.3);">
+        Mínimo 2 participantes para iniciar
+      </p>
+
+    </div>
+
+
+    <!-- ════════════════════════════════════
+         PANTALLA: HOST — MONITOREO
+    ════════════════════════════════════ -->
+    <div id="pantalla-host-monitoreo" class="pantalla">
+
+      <div class="tarjeta" style="text-align:center; gap:6px; display:flex; flex-direction:column;">
+        <h2 style="text-align:center;">⏳ Esperando números...</h2>
+        <p>Cada participante ingresa su número desde su cel.</p>
+      </div>
+
+      <div class="stats-row">
+        <div class="stat-box">
+          <div class="stat-numero" id="monitor-listos">0</div>
+          <div class="stat-label">✅ Listos</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-numero" id="monitor-pendientes">0</div>
+          <div class="stat-label">⏳ Pendientes</div>
+        </div>
+        <div class="stat-box">
+          <div class="stat-numero" id="monitor-total">0</div>
+          <div class="stat-label">Total</div>
+        </div>
+      </div>
+
+      <div class="tarjeta" style="gap:12px; display:flex; flex-direction:column;">
+        <p class="seccion-titulo">Estado por jugador</p>
+        <div id="lista-monitoreo" class="lista-participantes" style="max-height:320px;"></div>
+      </div>
+
+    </div>
+
+
+    <!-- ════════════════════════════════════
+         PANTALLA: UNIRSE A SALA (PARTICIPANTE)
+    ════════════════════════════════════ -->
+    <div id="pantalla-unirse" class="pantalla">
+
+      <div class="tarjeta" style="text-align:center; gap:8px; display:flex; flex-direction:column;">
+        <div class="deco">🍺</div>
+        <h2 style="text-align:center;">¡Te invitaron!</h2>
+        <p>Sala: <strong id="sala-id-display" style="color:var(--verde-claro); font-family:monospace;"></strong></p>
+      </div>
+
+      <div class="tarjeta" style="gap:12px; display:flex; flex-direction:column;">
+        <p style="color:rgba(255,255,255,0.65);">¿Cómo te llamas?</p>
+        <input type="text" id="input-nombre-unirse" placeholder="Tu nombre..." maxlength="30" />
+        <div id="error-unirse" class="mensaje-error"></div>
+        <button id="btn-unirse" class="btn btn-verde">✅ Unirme a la sala</button>
+      </div>
+
+    </div>
+
+
+    <!-- ════════════════════════════════════
+         PANTALLA: PARTICIPANTE — ESPERANDO INICIO
+    ════════════════════════════════════ -->
+    <div id="pantalla-participante-espera" class="pantalla">
+
+      <div class="tarjeta" style="text-align:center; padding:32px 20px; gap:16px; display:flex; flex-direction:column;">
+        <div class="spinner" style="margin:0 auto;"></div>
+        <h2 style="text-align:center;">¡Ya estás dentro! 🎉</h2>
+        <p>Espera a que el organizador inicie el juego...</p>
+        <p style="font-size:0.8rem; opacity:0.4;">Puedes dejar esta pantalla abierta, te avisará automáticamente.</p>
+      </div>
+
+    </div>
+
+
+    <!-- ════════════════════════════════════
+         PANTALLA: INGRESO DE NÚMERO
+    ════════════════════════════════════ -->
+    <div id="pantalla-ingreso-numero" class="pantalla">
+
+      <div class="banner-info">
+        <span style="font-size:1.2rem;">🔒</span>
+        <span><strong>Privado.</strong> Solo tú ves tu número antes de que se revelen los resultados.</span>
+      </div>
+
+      <div class="tarjeta" style="text-align:center; gap:8px; display:flex; flex-direction:column;">
+        <p style="font-size:0.9rem; color:rgba(255,255,255,0.5);">Es el turno de:</p>
+        <div class="turno-nombre" id="nombre-turno">—</div>
+      </div>
+
+      <div class="tarjeta" style="gap:12px; display:flex; flex-direction:column;">
+        <p style="color:rgba(255,255,255,0.6); font-size:0.9rem; text-align:center;">
+          📌 Escribe el número de tu tapa
+        </p>
+        <input
+          type="number"
+          id="input-numero"
+          class="input-grande"
+          placeholder="000"
+          inputmode="numeric"
+        />
+        <div id="error-numero" class="mensaje-error">⚠️ Ingresa un número entero válido.</div>
+        <button id="btn-guardar-numero" class="btn btn-verde">✅ Guardar número</button>
+      </div>
+
+    </div>
+
+
+    <!-- ════════════════════════════════════
+         PANTALLA: NÚMERO GUARDADO (espera resultados)
+    ════════════════════════════════════ -->
+    <div id="pantalla-numero-guardado" class="pantalla">
+
+      <div class="tarjeta" style="text-align:center; padding:40px 20px; gap:16px; display:flex; flex-direction:column;">
+        <div style="font-size:4rem;">✅</div>
+        <h2 style="text-align:center; color:#fff;">¡Número guardado!</h2>
+        <p>Esperando a que los demás ingresen su número...</p>
+        <div class="spinner" style="margin:8px auto 0;"></div>
+        <p style="font-size:0.8rem; opacity:0.4;">Los resultados aparecerán automáticamente.</p>
+      </div>
+
+    </div>
+
+
+    <!-- ════════════════════════════════════
+         PANTALLA: RESULTADOS
+    ════════════════════════════════════ -->
+    <div id="pantalla-resultados" class="pantalla">
+
+      <div class="tarjeta" style="text-align:center;">
+        <h2 style="text-align:center; font-size:2rem;">¡Resultados! 🎲</h2>
+      </div>
+
+      <div class="resultado-ganador">
+        <div class="resultado-emoji">🏆</div>
+        <div class="resultado-label">GANADOR — número más alto</div>
+        <div class="resultado-nombre" id="res-ganador-nombre">—</div>
+        <div class="resultado-numero" id="res-ganador-num">—</div>
+      </div>
+
+      <div class="resultado-perdedor">
+        <div class="resultado-emoji">😅</div>
+        <div class="resultado-label">CASTIGO — número más bajo</div>
+        <div class="resultado-nombre" id="res-perdedor-nombre">—</div>
+        <div class="resultado-numero" id="res-perdedor-num">—</div>
+      </div>
+
+      <div class="tarjeta" style="gap:12px; display:flex; flex-direction:column;">
+        <p class="seccion-titulo">Todos los resultados</p>
+        <div id="lista-resultados" class="lista-participantes" style="max-height:320px;"></div>
+      </div>
+
+      <button id="btn-nuevo-juego" class="btn btn-rojo">🔄 Nueva ronda</button>
+
+    </div>
+
+  </div><!-- /contenedor -->
+
+</body>
+</html>
