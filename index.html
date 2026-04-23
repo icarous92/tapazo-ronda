@@ -329,16 +329,16 @@
 
     function renderHostMonitoreo(data) {
       const jugadores = data.jugadores ? Object.values(data.jugadores) : [];
-      const listos    = jugadores.filter(j => j.numero !== null).length;
+      const listos    = jugadores.filter(j => typeof j.numero === 'number').length;
       document.getElementById('monitor-listos').textContent     = listos;
       document.getElementById('monitor-pendientes').textContent = jugadores.length - listos;
       document.getElementById('monitor-total').textContent      = jugadores.length;
       document.getElementById('lista-monitoreo').innerHTML = jugadores.map(j =>
         `<div class="item-participante">
            <span>👤 ${escaparHTML(j.nombre)}</span>
-           ${j.numero !== null ? '<span class="badge-verde">✅ Listo</span>' : '<span class="badge-pendiente">⏳ Pendiente</span>'}
+           ${typeof j.numero === 'number' ? '<span class="badge-verde">✅ Listo</span>' : '<span class="badge-pendiente">⏳ Pendiente</span>'}
          </div>`).join('');
-      if (jugadores.length >= 2 && jugadores.every(j => j.numero !== null)) {
+      if (jugadores.length >= 2 && jugadores.every(j => typeof j.numero === 'number')) {
         detenerEscucha();
         update(salaRef(miSalaId), { fase: 'resultados' });
         cargarYMostrarResultados(miSalaId);
@@ -369,7 +369,7 @@
       const nequiHost    = snapS.exists() ? snapS.val().nequiHost : null;
       const jugadoresRaw = snapJ.val();
       const jugadores    = Object.entries(jugadoresRaw)
-        .filter(([, j]) => j.numero !== null)
+        .filter(([, j]) => typeof j.numero === 'number')
         .map(([id, j]) => ({ ...j, _id: id }));
       if (jugadores.length === 0) return;
 
@@ -411,7 +411,7 @@
 
     function renderPanelPagos(salaId, jugadoresObj) {
       const jugadores = Object.entries(jugadoresObj)
-        .filter(([, j]) => j.numero !== null)
+        .filter(([, j]) => typeof j.numero === 'number')
         .map(([id, j]) => ({ ...j, _id: id }));
       document.getElementById('lista-pagos').innerHTML = jugadores.map(j => {
         const pagado = j.pagado === true;
