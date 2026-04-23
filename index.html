@@ -23,22 +23,33 @@
     const app = initializeApp(firebaseConfig);
     const db  = getDatabase(app);
 
-    // ─── Helpers ───────────────────────────────────────────────
+    // ─── Refs ───────────────────────────────────────────────────
+    function salaRef(id)               { return ref(db, `salas/${id}`); }
+    function jugadoresRef(id)          { return ref(db, `salas/${id}/jugadores`); }
+    function jugadorRef(salaId, jugId) { return ref(db, `salas/${salaId}/jugadores/${jugId}`); }
+    function adminRef()                { return ref(db, `admin`); }
+
+    // ─── Helpers ────────────────────────────────────────────────
     function uid(len = 6) { return Math.random().toString(36).substring(2, 2 + len).toUpperCase(); }
     function escaparHTML(str) {
       return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
     }
-    function salaRef(id)               { return ref(db, `salas/${id}`); }
-    function jugadoresRef(id)          { return ref(db, `salas/${id}/jugadores`); }
-    function jugadorRef(salaId, jugId) { return ref(db, `salas/${salaId}/jugadores/${jugId}`); }
-
-    // ── NUEVO: Validación de número celular ──────────────────────
     function validarCelular(num) {
-      const limpio = num.replace(/\D/g, '');
+      const limpio = String(num).replace(/\D/g, '');
       return limpio.length >= 10 ? limpio : null;
     }
+    function mostrar(id) {
+      document.querySelectorAll('.pantalla').forEach(p => p.classList.remove('activa'));
+      document.getElementById('pantalla-' + id)?.classList.add('activa');
+    }
+    function mostrarError(id, msg) {
+      const el = document.getElementById(id);
+      el.textContent = msg; el.classList.add('visible');
+      setTimeout(() => el.classList.remove('visible'), 4000);
+    }
 
-    let miSalaId = null, miJugadorId = null, soyHost = false, unsub = null;
+    // ─── Estado global ──────────────────────────────────────────
+    let miSalaId = null, miJugadorId = null, soyHost = false, soyAdmin = false, unsub = null;
 
     function getSalaDeURL() { return new URLSearchParams(window.location.search).get('sala') || null; }
     function setURLSala(id) {
@@ -46,12 +57,159 @@
       url.searchParams.set('sala', id);
       window.history.replaceState({}, '', url.toString());
     }
-    function mostrar(id) {
-      document.querySelectorAll('.pantalla').forEach(p => p.classList.remove('activa'));
-      document.getElementById('pantalla-' + id)?.classList.add('activa');
+
+    // ─── Escucha en tiempo real ──────────────────────────────────
+    function escucharSala(salaId, cb) {
+      detenerEscucha();
+      unsub = onValue(salaRef(salaId), snap => { if (snap.exists()) cb(snap.val()); });
+    }
+    function detenerEscucha() { if (typeof unsub === 'function') { unsub(); unsub = null; } }
+
+    // ════════════════════════════════════════════════════════════
+    // ADMIN
+    // ════════════════════════════════════════════════════════════
+    async function loginAdmin() {
+      const usuario  = document.getElementById('admin-usuario').value.trim();
+      const celular  = document.getElementById('admin-celular').value.trim();
+      const errLogin = document.getElementById('error-login');
+      errLogin.classList.remove('visible');
+
+      if (!usuario || !celular) {
+        errLogin.textContent = '⚠️ Completa usuario y celular.';
+        errLogin.classList.add('visible'); return;
+      }
+      const celularLimpio = validarCelular(celular);
+      if (!celularLimpio) {
+        errLogin.textContent = '⚠️ Celular inválido (mín. 10 dígitos).';
+        errLogin.classList.add('visible'); return;
+      }
+
+      const snap = await get(adminRef());
+      if (!snap.exists()) {
+        errLogin.textContent = '❌ No hay admin configurado. Ve a Firebase y agrega: admin/credenciales/{usuario, celular}.';
+        errLogin.classList.add('visible'); return;
+      }
+      const cred = snap.val().credenciales;
+      if (cred && cred.usuario === usuario && cred.celular === celularLimpio) {
+        soyAdmin = true;
+        localStorage.setItem('tapazo_admin', JSON.stringify({ usuario, celular: celularLimpio }));
+        await cargarPanelAdmin();
+      } else {
+        errLogin.textContent = '❌ Credenciales incorrectas.';
+        errLogin.classList.add('visible');
+        document.getElementById('admin-usuario').focus();
+      }
     }
 
-    // ─── MODIFICADO: crearSala ahora pide número Nequi ────────────
+    async function cargarPanelAdmin() {
+      const salasSnap = await get(ref(db, 'salas'));
+      if (!salasSnap.exists()) {
+        mostrar('admin-panel');
+        document.getElementById('admin-sala-id').textContent = '—';
+        document.getElementById('admin-fase').textContent = 'Sin sala';
+        document.getElementById('admin-lista').innerHTML = '<p class="estado-vacio">No hay salas creadas aún.</p>';
+        return;
+      }
+      // Tomar la sala más reciente
+      const salas = salasSnap.val();
+      let salaId = null, salaData = null, maxFecha = 0;
+      for (const [id, data] of Object.entries(salas)) {
+        if ((data.creadaEn || 0) > maxFecha) { maxFecha = data.creadaEn; salaId = id; salaData = data; }
+      }
+      document.getElementById('admin-sala-id').textContent = salaId;
+      document.getElementById('admin-fase').textContent = traducirFase(salaData.fase);
+      mostrar('admin-panel');
+      // Tiempo real
+      escucharSala(salaId, data => renderAdminPanel(salaId, data));
+    }
+
+    function traducirFase(fase) {
+      return { esperando:'⏳ Esperando', jugando:'🎮 En juego', resultados:'🏁 Finalizada' }[fase] || fase;
+    }
+
+    function renderAdminPanel(salaId, data) {
+      document.getElementById('admin-fase').textContent = traducirFase(data.fase);
+      const jugadoresObj = data.jugadores || {};
+      const jugadores = Object.entries(jugadoresObj)
+        .map(([id, j]) => ({ ...j, _id: id }))
+        .sort((a, b) => (a.registradoEn || 0) - (b.registradoEn || 0));
+
+      if (jugadores.length === 0) {
+        document.getElementById('admin-lista').innerHTML = '<p class="estado-vacio">Ningún usuario registrado aún.</p>';
+        return;
+      }
+      document.getElementById('admin-lista').innerHTML = jugadores.map(j => {
+        const pagado = j.pagado === true;
+        const numDisplay = (j.numero !== null && j.numero !== undefined)
+          ? `<span class="num-badge">${j.numero}</span>`
+          : `<span class="badge-pendiente">Sin #</span>`;
+        return `
+          <div class="item-admin">
+            <div class="item-admin-info">
+              <span class="item-admin-nombre">👤 ${escaparHTML(j.nombre)}</span>
+              <span class="item-admin-cel">📱 ${escaparHTML(j.celular || '—')}</span>
+            </div>
+            <div class="item-admin-derecha">
+              ${numDisplay}
+              <label class="checkbox-pago">
+                <input type="checkbox" ${pagado ? 'checked' : ''}
+                  onchange="window._togglePago('${escaparHTML(salaId)}','${escaparHTML(j._id)}',${pagado})" />
+                <span class="checkbox-label">${pagado ? '✅ Pagó' : '❌ No pagó'}</span>
+              </label>
+            </div>
+          </div>`;
+      }).join('');
+    }
+
+    window._togglePago = async function(salaId, jugId, estadoActual) {
+      await update(jugadorRef(salaId, jugId), { pagado: !estadoActual });
+    };
+
+    function cerrarSesionAdmin() {
+      localStorage.removeItem('tapazo_admin');
+      soyAdmin = false; detenerEscucha(); mostrar('admin-login');
+    }
+    window._cerrarAdmin = cerrarSesionAdmin;
+
+    // ════════════════════════════════════════════════════════════
+    // PARTICIPANTE — solo registro, sin espera de juego
+    // ════════════════════════════════════════════════════════════
+    async function registrarParticipante(salaId) {
+      const nombre  = document.getElementById('input-nombre-unirse').value.trim();
+      const celular = document.getElementById('input-celular-unirse').value.trim();
+      if (!nombre) { mostrarError('error-unirse', '⚠️ Escribe tu nombre.'); return; }
+      const celularValido = validarCelular(celular);
+      if (!celularValido) { mostrarError('error-unirse', '⚠️ Celular inválido (mín. 10 dígitos).'); return; }
+
+      const snap = await get(salaRef(salaId));
+      if (!snap.exists()) { mostrarError('error-unirse', '❌ La sala no existe o ya expiró.'); return; }
+      const data = snap.val();
+      const jugadores = data.jugadores || {};
+
+      if (Object.values(jugadores).some(j => j.nombre.toLowerCase() === nombre.toLowerCase())) {
+        mostrarError('error-unirse', '⚠️ Ese nombre ya está registrado.'); return;
+      }
+      if (Object.values(jugadores).some(j => j.celular === celularValido)) {
+        mostrarError('error-unirse', '⚠️ Ese celular ya está registrado en esta sala.'); return;
+      }
+
+      const nuevoRef = push(jugadoresRef(salaId));
+      miJugadorId = nuevoRef.key; miSalaId = salaId;
+      await set(nuevoRef, { nombre, celular: celularValido, numero: null, pagado: false, registradoEn: Date.now() });
+      localStorage.setItem('tapazo_jugador', JSON.stringify({ salaId, jugadorId: miJugadorId, nombre, celular: celularValido }));
+
+      // Mostrar confirmación
+      document.getElementById('confirmacion-nombre').textContent = nombre;
+      if (data.nequiHost) {
+        document.getElementById('confirmacion-nequi').style.display = 'flex';
+        document.getElementById('confirmacion-nequi-num').textContent = data.nequiHost;
+      }
+      mostrar('participante-confirmado');
+    }
+
+    // ════════════════════════════════════════════════════════════
+    // HOST
+    // ════════════════════════════════════════════════════════════
     async function crearSala() {
       const nequi = document.getElementById('input-nequi-host').value.trim();
       const errNequi = document.getElementById('error-nequi');
@@ -59,11 +217,9 @@
       if (!celularValido) {
         errNequi.textContent = '⚠️ Ingresa un número Nequi válido (mín. 10 dígitos).';
         errNequi.classList.add('visible');
-        document.getElementById('input-nequi-host').focus();
-        return;
+        document.getElementById('input-nequi-host').focus(); return;
       }
       errNequi.classList.remove('visible');
-
       const salaId = uid(6);
       setURLSala(salaId);
       await set(salaRef(salaId), { fase: 'esperando', creadaEn: Date.now(), nequiHost: celularValido });
@@ -73,70 +229,20 @@
       escucharSala(salaId, renderHostEspera);
     }
 
-    // ─── MODIFICADO: unirseASala ahora recibe también celular ─────
-    async function unirseASala(salaId, nombre, celular) {
-      const snap = await get(salaRef(salaId));
-      if (!snap.exists()) { mostrarError('error-unirse', '❌ La sala no existe o ya expiró.'); return; }
-      const data = snap.val();
-      if (data.fase === 'resultados') { mostrarError('error-unirse', '❌ El juego ya terminó.'); return; }
-      const jugadores = data.jugadores || {};
-
-      if (Object.values(jugadores).some(j => j.nombre.toLowerCase() === nombre.toLowerCase())) {
-        mostrarError('error-unirse', '⚠️ Ese nombre ya está en uso.'); return;
-      }
-      // NUEVO: validar duplicado de celular
-      if (Object.values(jugadores).some(j => j.celular === celular)) {
-        mostrarError('error-unirse', '⚠️ Ese número de celular ya está registrado en esta sala.'); return;
-      }
-
-      const nuevoRef = push(jugadoresRef(salaId));
-      miJugadorId = nuevoRef.key; miSalaId = salaId;
-      // NUEVO: guarda celular en Firebase
-      await set(nuevoRef, { nombre, celular, numero: null, pagado: false, registradoEn: Date.now() });
-      localStorage.setItem('tapazo_jugador', JSON.stringify({ salaId, jugadorId: miJugadorId, nombre, celular }));
-
-      // NUEVO: mostrar número Nequi del host al participante
-      if (data.nequiHost) {
-        mostrarBannerNequi(data.nequiHost);
-      }
-
-      if (data.fase === 'jugando') {
-        mostrar('ingreso-numero');
-        document.getElementById('nombre-turno').textContent = nombre;
-        escucharSala(salaId, d => { if (d.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaId); } });
-      } else {
-        mostrar('participante-espera');
-        escucharSala(salaId, d => {
-          if (d.fase === 'jugando') {
-            detenerEscucha(); mostrar('ingreso-numero');
-            document.getElementById('nombre-turno').textContent = nombre;
-            escucharSala(salaId, d2 => { if (d2.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaId); } });
-          }
-          if (d.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaId); }
-        });
-      }
-    }
-
-    // NUEVO: Banner de Nequi para participante
-    function mostrarBannerNequi(nequi) {
-      document.querySelectorAll('.banner-nequi-participante').forEach(el => {
-        el.style.display = 'flex';
-        el.querySelector('.nequi-numero').textContent = nequi;
-      });
-    }
-
-    function escucharSala(salaId, cb) {
-      detenerEscucha();
-      unsub = onValue(salaRef(salaId), snap => { if (snap.exists()) cb(snap.val()); });
-    }
-    function detenerEscucha() { if (typeof unsub === 'function') { unsub(); unsub = null; } }
-
     function renderHostEspera(data) {
       const jugadores = data.jugadores ? Object.values(data.jugadores) : [];
       document.getElementById('lista-espera').innerHTML = jugadores.length === 0
-        ? '<p class="estado-vacio">Nadie se ha unido aún 🤷</p>'
-        : jugadores.map(j => `<div class="item-participante"><span>👤 ${escaparHTML(j.nombre)}</span><span class="badge-verde">✓ Listo</span></div>`).join('');
-      document.getElementById('contador-espera').textContent = jugadores.length === 1 ? '1 persona' : `${jugadores.length} personas`;
+        ? '<p class="estado-vacio">Nadie se ha registrado aún 🤷</p>'
+        : jugadores.map(j => `
+            <div class="item-participante">
+              <div style="display:flex;flex-direction:column;gap:2px;">
+                <span>👤 ${escaparHTML(j.nombre)}</span>
+                <span style="font-size:0.78rem;color:rgba(255,255,255,0.4);">📱 ${escaparHTML(j.celular || '—')}</span>
+              </div>
+              <span class="badge-verde">✓ Registrado</span>
+            </div>`).join('');
+      document.getElementById('contador-espera').textContent =
+        jugadores.length === 1 ? '1 persona' : `${jugadores.length} personas`;
       document.getElementById('btn-iniciar-juego').disabled = jugadores.length < 2;
       if (data.fase === 'jugando')    { detenerEscucha(); mostrar('host-monitoreo'); escucharSala(miSalaId, renderHostMonitoreo); }
       if (data.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(miSalaId); }
@@ -145,14 +251,15 @@
     async function iniciarJuego() { await update(salaRef(miSalaId), { fase: 'jugando' }); }
 
     function renderHostMonitoreo(data) {
-      const jugadores  = data.jugadores ? Object.values(data.jugadores) : [];
-      const listos     = jugadores.filter(j => j.numero !== null).length;
+      const jugadores = data.jugadores ? Object.values(data.jugadores) : [];
+      const listos    = jugadores.filter(j => j.numero !== null).length;
       document.getElementById('monitor-listos').textContent     = listos;
       document.getElementById('monitor-pendientes').textContent = jugadores.length - listos;
       document.getElementById('monitor-total').textContent      = jugadores.length;
       document.getElementById('lista-monitoreo').innerHTML = jugadores.map(j =>
-        `<div class="item-participante"><span>👤 ${escaparHTML(j.nombre)}</span>
-         ${j.numero !== null ? '<span class="badge-verde">✅ Listo</span>' : '<span class="badge-pendiente">⏳ Pendiente</span>'}
+        `<div class="item-participante">
+           <span>👤 ${escaparHTML(j.nombre)}</span>
+           ${j.numero !== null ? '<span class="badge-verde">✅ Listo</span>' : '<span class="badge-pendiente">⏳ Pendiente</span>'}
          </div>`).join('');
       if (jugadores.length >= 2 && jugadores.every(j => j.numero !== null)) {
         detenerEscucha();
@@ -173,13 +280,11 @@
       mostrar('numero-guardado');
     }
 
-    // ─── MODIFICADO: cargarYMostrarResultados añade panel de pagos ─
     async function cargarYMostrarResultados(salaId) {
-      const snap = await get(jugadoresRef(salaId));
+      const snap     = await get(jugadoresRef(salaId));
       if (!snap.exists()) return;
-      const snapSala = await get(salaRef(salaId));
+      const snapSala  = await get(salaRef(salaId));
       const nequiHost = snapSala.exists() ? snapSala.val().nequiHost : null;
-
       const jugadoresRaw = snap.val();
       const jugadores = Object.entries(jugadoresRaw)
         .filter(([, j]) => j.numero !== null)
@@ -188,72 +293,51 @@
 
       const ganador  = jugadores.reduce((max, j) => j.numero > max.numero ? j : max, jugadores[0]);
       const perdedor = jugadores.reduce((min, j) => j.numero < min.numero ? j : min, jugadores[0]);
-
       document.getElementById('res-ganador-nombre').textContent  = ganador.nombre;
       document.getElementById('res-ganador-num').textContent     = ganador.numero;
       document.getElementById('res-perdedor-nombre').textContent = perdedor.nombre;
       document.getElementById('res-perdedor-num').textContent    = perdedor.numero;
+      document.getElementById('lista-resultados').innerHTML = [...jugadores]
+        .sort((a,b) => b.numero - a.numero).map((j,i) => {
+          const esG = j.nombre === ganador.nombre && j.numero === ganador.numero;
+          const esP = j.nombre === perdedor.nombre && j.numero === perdedor.numero;
+          return `<div class="item-participante"><span>${esG?'🏆':esP?'😅':'#'+(i+1)} ${escaparHTML(j.nombre)}</span><span class="num-badge">${j.numero}</span></div>`;
+        }).join('');
 
-      document.getElementById('lista-resultados').innerHTML = [...jugadores].sort((a,b) => b.numero - a.numero).map((j,i) => {
-        const esG = j.nombre === ganador.nombre && j.numero === ganador.numero;
-        const esP = j.nombre === perdedor.nombre && j.numero === perdedor.numero;
-        return `<div class="item-participante"><span>${esG?'🏆':esP?'😅':'#'+(i+1)} ${escaparHTML(j.nombre)}</span><span class="num-badge">${j.numero}</span></div>`;
-      }).join('');
-
-      // NUEVO: Banner Nequi en resultados (participante)
       const bannerNequi = document.getElementById('banner-nequi-resultados');
       if (!soyHost && nequiHost) {
         bannerNequi.style.display = 'flex';
         document.getElementById('nequi-resultados-num').textContent = nequiHost;
-      } else {
-        bannerNequi.style.display = 'none';
-      }
+      } else { bannerNequi.style.display = 'none'; }
 
-      // NUEVO: Panel de pagos (solo host)
       const panelPagos = document.getElementById('panel-pagos-host');
       if (soyHost) {
         panelPagos.style.display = 'flex';
         renderPanelPagos(salaId, jugadoresRaw);
-        // Escuchar cambios de pago en tiempo real
-        escucharSala(salaId, data => {
-          if (data.jugadores) renderPanelPagos(salaId, data.jugadores);
-        });
-      } else {
-        panelPagos.style.display = 'none';
-      }
-
+        escucharSala(salaId, data => { if (data.jugadores) renderPanelPagos(salaId, data.jugadores); });
+      } else { panelPagos.style.display = 'none'; }
       mostrar('resultados');
     }
 
-    // NUEVO: Renderiza la lista de pagos del panel del host
     function renderPanelPagos(salaId, jugadoresObj) {
-      const lista = document.getElementById('lista-pagos');
       const jugadores = Object.entries(jugadoresObj)
         .filter(([, j]) => j.numero !== null)
         .map(([id, j]) => ({ ...j, _id: id }));
-
-      lista.innerHTML = jugadores.map(j => {
+      document.getElementById('lista-pagos').innerHTML = jugadores.map(j => {
         const pagado = j.pagado === true;
         return `
-          <div class="item-participante item-pago" data-jugid="${escaparHTML(j._id)}">
+          <div class="item-participante item-pago">
             <div style="display:flex;flex-direction:column;gap:2px;">
               <span style="font-weight:700;">👤 ${escaparHTML(j.nombre)}</span>
               ${j.celular ? `<span style="font-size:0.78rem;color:rgba(255,255,255,0.4);">📱 ${escaparHTML(j.celular)}</span>` : ''}
             </div>
-            <button
-              class="btn-pago ${pagado ? 'btn-pago-si' : 'btn-pago-no'}"
-              onclick="window._togglePago('${escaparHTML(salaId)}', '${escaparHTML(j._id)}', ${pagado})"
-            >
+            <button class="btn-pago ${pagado ? 'btn-pago-si' : 'btn-pago-no'}"
+              onclick="window._togglePago('${escaparHTML(salaId)}','${escaparHTML(j._id)}',${pagado})">
               ${pagado ? '✅ Pagó' : '❌ No pagó'}
             </button>
           </div>`;
       }).join('');
     }
-
-    // NUEVO: Toggle pago — expuesto en window para uso desde onclick inline
-    window._togglePago = async function(salaId, jugId, estadoActual) {
-      await update(jugadorRef(salaId, jugId), { pagado: !estadoActual });
-    };
 
     function nuevoJuego() {
       localStorage.removeItem('tapazo_jugador');
@@ -264,88 +348,112 @@
       detenerEscucha(); mostrar('inicio');
     }
 
-    function mostrarError(id, msg) {
-      const el = document.getElementById(id);
-      el.textContent = msg; el.classList.add('visible');
-      setTimeout(() => el.classList.remove('visible'), 4000);
-    }
-
-    // ─── DOMContentLoaded ─────────────────────────────────────────
+    // ════════════════════════════════════════════════════════════
+    // INIT
+    // ════════════════════════════════════════════════════════════
     window.addEventListener('DOMContentLoaded', async () => {
       const salaEnURL = getSalaDeURL();
 
+      // ── Sesión admin guardada ──
+      const adminGuardado = JSON.parse(localStorage.getItem('tapazo_admin') || 'null');
+      if (adminGuardado) {
+        const snap = await get(adminRef());
+        if (snap.exists()) {
+          const cred = snap.val().credenciales;
+          if (cred && cred.usuario === adminGuardado.usuario && cred.celular === adminGuardado.celular) {
+            soyAdmin = true;
+            bindAdminEvents();
+            await cargarPanelAdmin();
+            return;
+          }
+        }
+        localStorage.removeItem('tapazo_admin');
+      }
+
+      // ── Participante con sala en URL ──
       if (salaEnURL) {
+        bindParticipanteEvents(salaEnURL);
         const guardado = JSON.parse(localStorage.getItem('tapazo_jugador') || 'null');
         if (guardado && guardado.salaId === salaEnURL && guardado.jugadorId) {
           miSalaId = guardado.salaId; miJugadorId = guardado.jugadorId;
           const snap = await get(salaRef(salaEnURL));
           if (snap.exists()) {
-            const data    = snap.val();
-
-            // NUEVO: restaurar banner Nequi si hay sesión guardada
-            if (data.nequiHost) mostrarBannerNequi(data.nequiHost);
-
-            const jugSnap = await get(jugadorRef(salaEnURL, guardado.jugadorId));
-            if (jugSnap.exists() && jugSnap.val().numero !== null) {
-              mostrar('numero-guardado');
-              escucharSala(salaEnURL, d => { if (d.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaEnURL); } });
-            } else if (data.fase === 'jugando') {
+            const data = snap.val();
+            if (data.fase === 'jugando') {
               mostrar('ingreso-numero');
               document.getElementById('nombre-turno').textContent = guardado.nombre;
               escucharSala(salaEnURL, d => { if (d.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaEnURL); } });
             } else if (data.fase === 'resultados') {
               cargarYMostrarResultados(salaEnURL);
             } else {
-              mostrar('participante-espera');
-              escucharSala(salaEnURL, d => {
-                if (d.fase === 'jugando')    { detenerEscucha(); mostrar('ingreso-numero'); document.getElementById('nombre-turno').textContent = guardado.nombre; }
-                if (d.fase === 'resultados') { detenerEscucha(); cargarYMostrarResultados(salaEnURL); }
-              });
+              // Ya registrado — mostrar confirmación
+              document.getElementById('confirmacion-nombre').textContent = guardado.nombre;
+              if (data.nequiHost) {
+                document.getElementById('confirmacion-nequi').style.display = 'flex';
+                document.getElementById('confirmacion-nequi-num').textContent = data.nequiHost;
+              }
+              mostrar('participante-confirmado');
             }
             return;
           }
         }
         mostrar('unirse');
         document.getElementById('sala-id-display').textContent = salaEnURL;
-      } else {
-        mostrar('inicio');
+        return;
       }
 
-      // Botón crear sala
-      document.getElementById('btn-crear-sala').addEventListener('click', crearSala);
-      document.getElementById('input-nequi-host').addEventListener('keydown', e => { if (e.key === 'Enter') crearSala(); });
+      // ── Pantalla de inicio (host) ──
+      mostrar('inicio');
+      bindHostEvents();
+      bindAdminEvents();
+    });
 
-      document.getElementById('btn-iniciar-juego').addEventListener('click', iniciarJuego);
-      document.getElementById('btn-guardar-numero').addEventListener('click', guardarMiNumero);
-      document.getElementById('btn-nuevo-juego').addEventListener('click', nuevoJuego);
-
-      // MODIFICADO: btn-unirse ahora valida nombre + celular
-      document.getElementById('btn-unirse').addEventListener('click', async () => {
-        const nombre  = document.getElementById('input-nombre-unirse').value.trim();
-        const celular = document.getElementById('input-celular-unirse').value.trim();
-        if (!nombre) { mostrarError('error-unirse', '⚠️ Escribe tu nombre.'); return; }
-        const celularValido = validarCelular(celular);
-        if (!celularValido) { mostrarError('error-unirse', '⚠️ Ingresa un número de celular válido (mín. 10 dígitos).'); return; }
-        await unirseASala(salaEnURL, nombre, celularValido);
-      });
-
-      document.getElementById('input-nombre-unirse')?.addEventListener('keydown', e => { if (e.key==='Enter') document.getElementById('input-celular-unirse').focus(); });
-      document.getElementById('input-celular-unirse')?.addEventListener('keydown', e => { if (e.key==='Enter') document.getElementById('btn-unirse').click(); });
+    // ─── Bind helpers ────────────────────────────────────────────
+    function bindHostEvents() {
+      document.getElementById('btn-crear-sala')?.addEventListener('click', crearSala);
+      document.getElementById('input-nequi-host')?.addEventListener('keydown', e => { if (e.key === 'Enter') crearSala(); });
+      document.getElementById('btn-iniciar-juego')?.addEventListener('click', iniciarJuego);
+      document.getElementById('btn-guardar-numero')?.addEventListener('click', guardarMiNumero);
+      document.getElementById('btn-nuevo-juego')?.addEventListener('click', nuevoJuego);
       document.getElementById('input-numero')?.addEventListener('keydown', e => { if (e.key==='Enter') guardarMiNumero(); });
-
-      document.getElementById('btn-copiar-link').addEventListener('click', () => {
+      document.getElementById('btn-copiar-link')?.addEventListener('click', () => {
         navigator.clipboard.writeText(document.getElementById('link-sala').value).then(() => {
           const btn = document.getElementById('btn-copiar-link');
           btn.textContent = '✅ ¡Copiado!';
           setTimeout(() => btn.textContent = '📋 Copiar link', 2000);
         });
       });
-      document.getElementById('btn-compartir').addEventListener('click', () => {
+      document.getElementById('btn-compartir')?.addEventListener('click', () => {
         const link = document.getElementById('link-sala').value;
         if (navigator.share) navigator.share({ title:'Tapazo por Número 🍺', text:'¡Únete a la ronda!', url:link });
         else document.getElementById('btn-copiar-link').click();
       });
-    });
+    }
+
+    function bindParticipanteEvents(salaId) {
+      document.getElementById('btn-unirse')?.addEventListener('click', () => registrarParticipante(salaId));
+      document.getElementById('input-nombre-unirse')?.addEventListener('keydown', e => {
+        if (e.key === 'Enter') document.getElementById('input-celular-unirse')?.focus();
+      });
+      document.getElementById('input-celular-unirse')?.addEventListener('keydown', e => {
+        if (e.key === 'Enter') registrarParticipante(salaId);
+      });
+      document.getElementById('btn-guardar-numero')?.addEventListener('click', guardarMiNumero);
+      document.getElementById('input-numero')?.addEventListener('keydown', e => { if (e.key==='Enter') guardarMiNumero(); });
+    }
+
+    function bindAdminEvents() {
+      document.getElementById('btn-acceso-admin')?.addEventListener('click', () => mostrar('admin-login'));
+      document.getElementById('btn-login-admin')?.addEventListener('click', loginAdmin);
+      document.getElementById('btn-cerrar-admin')?.addEventListener('click', cerrarSesionAdmin);
+      document.getElementById('btn-back-inicio')?.addEventListener('click', () => mostrar('inicio'));
+      document.getElementById('admin-usuario')?.addEventListener('keydown', e => {
+        if (e.key === 'Enter') document.getElementById('admin-celular')?.focus();
+      });
+      document.getElementById('admin-celular')?.addEventListener('keydown', e => {
+        if (e.key === 'Enter') loginAdmin();
+      });
+    }
   </script>
 
   <style>
@@ -353,8 +461,7 @@
       --verde:#2e7d32; --verde-claro:#4caf50; --verde-hover:#1b5e20;
       --amarillo:#f9a825; --rojo:#c62828; --rojo-hover:#8e0000;
       --negro:#1a1a1a; --gris-oscuro:#2c2c2c; --blanco:#fafafa;
-      --sombra:0 4px 20px rgba(0,0,0,0.25); --radio:16px;
-      --nequi:#6c0bad;
+      --sombra:0 4px 20px rgba(0,0,0,0.25); --radio:16px; --nequi:#6c0bad;
     }
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
     body{font-family:'Nunito',sans-serif;background:var(--negro);color:var(--blanco);min-height:100dvh;display:flex;flex-direction:column;align-items:center;padding:0 0 48px;background-image:repeating-linear-gradient(45deg,transparent,transparent 2px,rgba(255,255,255,0.015) 2px,rgba(255,255,255,0.015) 4px)}
@@ -368,7 +475,7 @@
     .tarjeta{background:var(--gris-oscuro);border-radius:var(--radio);padding:24px 20px;box-shadow:var(--sombra);border:1px solid rgba(255,255,255,0.07)}
     .tarjeta h2{font-family:'Bebas Neue',sans-serif;font-size:1.7rem;letter-spacing:1.5px;color:var(--verde-claro);margin-bottom:6px}
     .tarjeta p{color:rgba(255,255,255,0.65);font-size:0.95rem;line-height:1.5}
-    input[type="text"],input[type="number"],input[type="tel"]{width:100%;padding:16px 18px;font-size:1.15rem;font-family:'Nunito',sans-serif;font-weight:700;border-radius:12px;border:2px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.07);color:#fff;outline:none;transition:border-color 0.2s,background 0.2s;-webkit-appearance:none}
+    input[type="text"],input[type="number"],input[type="tel"],input[type="password"]{width:100%;padding:16px 18px;font-size:1.15rem;font-family:'Nunito',sans-serif;font-weight:700;border-radius:12px;border:2px solid rgba(255,255,255,0.12);background:rgba(255,255,255,0.07);color:#fff;outline:none;transition:border-color 0.2s,background 0.2s;-webkit-appearance:none}
     input::placeholder{color:rgba(255,255,255,0.35);font-weight:400}
     input:focus{border-color:var(--verde-claro);background:rgba(76,175,80,0.1)}
     .input-grande{font-size:2.8rem!important;text-align:center;padding:24px 18px!important;letter-spacing:2px}
@@ -416,15 +523,16 @@
     .stat-label{font-size:0.75rem;color:rgba(255,255,255,0.45);margin-top:2px}
     .spinner{display:inline-block;width:28px;height:28px;border:3px solid rgba(76,175,80,0.25);border-top-color:var(--verde-claro);border-radius:50%;animation:spin 0.9s linear infinite;margin-bottom:10px}
     @keyframes spin{to{transform:rotate(360deg)}}
+    .campo-label{font-size:0.82rem;color:rgba(255,255,255,0.45);margin-bottom:6px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px}
 
-    /* ── NUEVO: Estilos Nequi ── */
+    /* Nequi */
     .banner-nequi{background:linear-gradient(135deg,rgba(108,11,173,0.25),rgba(108,11,173,0.1));border:1.5px solid rgba(108,11,173,0.5);border-radius:14px;padding:14px 18px;display:flex;align-items:center;gap:12px}
     .banner-nequi .nequi-icon{font-size:1.6rem;flex-shrink:0}
     .banner-nequi .nequi-info{display:flex;flex-direction:column;gap:2px}
     .banner-nequi .nequi-label{font-size:0.75rem;color:rgba(255,255,255,0.5);text-transform:uppercase;letter-spacing:1px}
     .banner-nequi .nequi-numero{font-family:'Bebas Neue',sans-serif;font-size:1.5rem;color:#d98fff;letter-spacing:2px}
 
-    /* ── NUEVO: Panel de pagos ── */
+    /* Panel pagos host */
     .panel-pagos{display:flex;flex-direction:column;gap:12px}
     .panel-pagos-titulo{display:flex;align-items:center;gap:8px;font-family:'Bebas Neue',sans-serif;font-size:1.3rem;letter-spacing:2px;color:rgba(255,255,255,0.5)}
     .lista-pagos{display:flex;flex-direction:column;gap:8px;max-height:300px;overflow-y:auto;padding-right:4px}
@@ -438,8 +546,33 @@
     .btn-pago-si{background:rgba(76,175,80,0.25);color:var(--verde-claro);border:1.5px solid rgba(76,175,80,0.4)}
     .btn-pago-si:hover{background:rgba(76,175,80,0.4)}
 
-    /* ── NUEVO: Input label ── */
-    .campo-label{font-size:0.82rem;color:rgba(255,255,255,0.45);margin-bottom:4px;font-weight:600;text-transform:uppercase;letter-spacing:0.5px}
+    /* Admin */
+    .admin-acceso-btn{background:none;border:none;color:rgba(255,255,255,0.18);font-size:0.75rem;cursor:pointer;padding:10px;font-family:'Nunito',sans-serif;letter-spacing:0.5px;transition:color 0.2s;display:block;width:100%;text-align:center}
+    .admin-acceso-btn:hover{color:rgba(255,255,255,0.5)}
+    .admin-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+    .admin-badge{background:rgba(249,168,37,0.15);border:1px solid rgba(249,168,37,0.35);color:var(--amarillo);border-radius:8px;padding:3px 10px;font-size:0.75rem;font-weight:700;letter-spacing:1px}
+    .admin-sala-info{background:rgba(255,255,255,0.04);border:1px solid rgba(255,255,255,0.08);border-radius:12px;padding:14px 18px;display:flex;gap:20px;align-items:center}
+    .admin-sala-dato{display:flex;flex-direction:column;gap:3px}
+    .admin-sala-dato-label{font-size:0.72rem;color:rgba(255,255,255,0.35);text-transform:uppercase;letter-spacing:0.5px}
+    .admin-sala-dato-val{font-family:'Bebas Neue',sans-serif;font-size:1.2rem;color:var(--verde-claro);letter-spacing:1px}
+    .admin-divider{width:1px;background:rgba(255,255,255,0.1);align-self:stretch}
+
+    /* Item admin (tabla de usuarios) */
+    .lista-admin{display:flex;flex-direction:column;gap:8px;max-height:440px;overflow-y:auto;padding-right:4px}
+    .lista-admin::-webkit-scrollbar{width:4px}
+    .lista-admin::-webkit-scrollbar-thumb{background:var(--amarillo);border-radius:4px}
+    .item-admin{display:flex;align-items:center;justify-content:space-between;background:rgba(255,255,255,0.05);border-radius:12px;padding:14px 16px;border:1px solid rgba(255,255,255,0.07);gap:10px;animation:slideIn 0.2s ease}
+    .item-admin-info{display:flex;flex-direction:column;gap:3px;flex:1;min-width:0}
+    .item-admin-nombre{font-weight:700;font-size:0.98rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    .item-admin-cel{font-size:0.78rem;color:rgba(255,255,255,0.4)}
+    .item-admin-derecha{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex-shrink:0}
+    .checkbox-pago{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+    .checkbox-pago input[type="checkbox"]{width:18px;height:18px;accent-color:var(--verde-claro);cursor:pointer;flex-shrink:0}
+    .checkbox-label{font-size:0.82rem;font-weight:700;white-space:nowrap}
+
+    /* Confirmación participante */
+    .check-grande{font-size:4.5rem;line-height:1;margin-bottom:4px}
+    .confirmacion-nombre{font-family:'Bebas Neue',sans-serif;font-size:2rem;color:var(--verde-claro);letter-spacing:2px;margin:4px 0}
   </style>
 </head>
 <body>
@@ -451,12 +584,12 @@
 
   <div class="contenedor">
 
-    <!-- ── PANTALLA INICIO (MODIFICADA: + campo Nequi) ── -->
+    <!-- ══ INICIO ══════════════════════════════════════════════ -->
     <div id="pantalla-inicio" class="pantalla">
       <div class="tarjeta" style="text-align:center;padding:32px 20px;">
         <div class="deco">🍺🎲🍺</div>
         <h2 style="text-align:center;margin-top:12px;">¡Bienvenido!</h2>
-        <p style="margin-top:8px;">Crea una sala, comparte el link y cada quien ingresa su número desde su propio celular.</p>
+        <p style="margin-top:8px;">Crea una sala, comparte el link y cada quien se registra desde su propio celular.</p>
       </div>
       <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
         <div class="campo-label">💜 Tu número Nequi (para recibir pagos)</div>
@@ -464,13 +597,64 @@
         <div id="error-nequi" class="mensaje-error"></div>
       </div>
       <button id="btn-crear-sala" class="btn btn-verde">🎮 Crear nueva sala</button>
+      <button id="btn-acceso-admin" class="admin-acceso-btn">⚙ Acceso administrador</button>
     </div>
 
-    <!-- ── PANTALLA HOST ESPERA (sin cambios) ── -->
+    <!-- ══ ADMIN LOGIN ══════════════════════════════════════════ -->
+    <div id="pantalla-admin-login" class="pantalla">
+      <div class="tarjeta" style="text-align:center;gap:8px;display:flex;flex-direction:column;">
+        <div style="font-size:2.2rem;">🔐</div>
+        <h2 style="text-align:center;">Panel Admin</h2>
+        <p>Ingresa tus credenciales de administrador</p>
+      </div>
+      <div class="tarjeta" style="gap:14px;display:flex;flex-direction:column;">
+        <div>
+          <div class="campo-label">👤 Usuario</div>
+          <input type="text" id="admin-usuario" placeholder="Nombre de usuario..." maxlength="40" autocomplete="off" />
+        </div>
+        <div>
+          <div class="campo-label">📱 Número de celular</div>
+          <input type="tel" id="admin-celular" placeholder="Ej: 3001234567" maxlength="15" inputmode="numeric" />
+        </div>
+        <div id="error-login" class="mensaje-error"></div>
+        <button id="btn-login-admin" class="btn btn-amarillo">🔓 Ingresar</button>
+      </div>
+      <button id="btn-back-inicio" class="btn btn-secundario">← Volver</button>
+    </div>
+
+    <!-- ══ ADMIN PANEL ══════════════════════════════════════════ -->
+    <div id="pantalla-admin-panel" class="pantalla">
+      <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
+        <div class="admin-header">
+          <h2 style="margin-bottom:0;">📊 Panel Admin</h2>
+          <span class="admin-badge">ADMIN</span>
+        </div>
+        <div class="admin-sala-info">
+          <div class="admin-sala-dato">
+            <div class="admin-sala-dato-label">Sala activa</div>
+            <div class="admin-sala-dato-val" id="admin-sala-id">—</div>
+          </div>
+          <div class="admin-divider"></div>
+          <div class="admin-sala-dato">
+            <div class="admin-sala-dato-label">Estado</div>
+            <div class="admin-sala-dato-val" id="admin-fase" style="font-size:0.95rem;">—</div>
+          </div>
+        </div>
+      </div>
+      <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
+        <p class="seccion-titulo">👥 Usuarios registrados</p>
+        <div id="admin-lista" class="lista-admin">
+          <p class="estado-vacio">Cargando...</p>
+        </div>
+      </div>
+      <button id="btn-cerrar-admin" class="btn btn-rojo" style="font-size:1.1rem;padding:14px 20px;">🚪 Cerrar sesión</button>
+    </div>
+
+    <!-- ══ HOST ESPERA ══════════════════════════════════════════ -->
     <div id="pantalla-host-espera" class="pantalla">
       <div class="tarjeta" style="text-align:center;gap:10px;display:flex;flex-direction:column;">
         <h2 style="text-align:center;">🔗 Comparte el link</h2>
-        <p>Que cada participante lo abra desde su celular y escriba su nombre.</p>
+        <p>Que cada participante lo abra desde su celular y se registre.</p>
         <input id="link-sala" class="input-link" type="text" readonly />
         <div style="display:flex;gap:10px;">
           <button id="btn-copiar-link" class="btn btn-secundario btn-sm" style="flex:1;">📋 Copiar link</button>
@@ -483,14 +667,14 @@
           <span id="contador-espera" class="contador-tag">0 personas</span>
         </div>
         <div id="lista-espera" class="lista-participantes">
-          <p class="estado-vacio">Nadie se ha unido aún 🤷</p>
+          <p class="estado-vacio">Nadie se ha registrado aún 🤷</p>
         </div>
       </div>
       <button id="btn-iniciar-juego" class="btn btn-amarillo" disabled>🎯 Iniciar juego</button>
       <p style="text-align:center;font-size:0.8rem;color:rgba(255,255,255,0.3);">Mínimo 2 participantes para iniciar</p>
     </div>
 
-    <!-- ── PANTALLA HOST MONITOREO (sin cambios) ── -->
+    <!-- ══ HOST MONITOREO ═══════════════════════════════════════ -->
     <div id="pantalla-host-monitoreo" class="pantalla">
       <div class="tarjeta" style="text-align:center;gap:6px;display:flex;flex-direction:column;">
         <h2 style="text-align:center;">⏳ Esperando números...</h2>
@@ -507,14 +691,14 @@
       </div>
     </div>
 
-    <!-- ── PANTALLA UNIRSE (MODIFICADA: + campo celular) ── -->
+    <!-- ══ UNIRSE ═══════════════════════════════════════════════ -->
     <div id="pantalla-unirse" class="pantalla">
       <div class="tarjeta" style="text-align:center;gap:8px;display:flex;flex-direction:column;">
         <div class="deco">🍺</div>
         <h2 style="text-align:center;">¡Te invitaron!</h2>
         <p>Sala: <strong id="sala-id-display" style="color:var(--verde-claro);font-family:monospace;"></strong></p>
       </div>
-      <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
+      <div class="tarjeta" style="gap:14px;display:flex;flex-direction:column;">
         <div>
           <div class="campo-label">👤 Tu nombre</div>
           <input type="text" id="input-nombre-unirse" placeholder="Ej: Juan..." maxlength="30" />
@@ -524,38 +708,29 @@
           <input type="tel" id="input-celular-unirse" placeholder="Ej: 3001234567" maxlength="15" inputmode="numeric" />
         </div>
         <div id="error-unirse" class="mensaje-error"></div>
-        <button id="btn-unirse" class="btn btn-verde">✅ Unirme a la sala</button>
+        <button id="btn-unirse" class="btn btn-verde">✅ Registrarme</button>
       </div>
     </div>
 
-    <!-- ── PANTALLA PARTICIPANTE ESPERA (MODIFICADA: + banner Nequi oculto) ── -->
-    <div id="pantalla-participante-espera" class="pantalla">
-      <!-- NUEVO: Banner Nequi (oculto por defecto, se muestra si hay nequiHost) -->
-      <div class="banner-nequi banner-nequi-participante" style="display:none;">
+    <!-- ══ CONFIRMACIÓN REGISTRO (reemplaza "espera") ══════════ -->
+    <div id="pantalla-participante-confirmado" class="pantalla">
+      <div class="tarjeta" style="text-align:center;padding:36px 20px;gap:12px;display:flex;flex-direction:column;">
+        <div class="check-grande">✅</div>
+        <p style="font-size:0.88rem;color:rgba(255,255,255,0.4);text-transform:uppercase;letter-spacing:1px;">¡Registro exitoso!</p>
+        <div class="confirmacion-nombre" id="confirmacion-nombre">—</div>
+        <p style="font-size:0.9rem;color:rgba(255,255,255,0.6);margin-top:4px;">Quedaste registrado en la sala. El organizador ya tiene tus datos.</p>
+      </div>
+      <div id="confirmacion-nequi" class="banner-nequi" style="display:none;">
         <div class="nequi-icon">💜</div>
         <div class="nequi-info">
           <div class="nequi-label">Paga tu botella por Nequi a:</div>
-          <div class="nequi-numero">— <span class="nequi-numero"></span></div>
+          <div class="nequi-numero" id="confirmacion-nequi-num">—</div>
         </div>
-      </div>
-      <div class="tarjeta" style="text-align:center;padding:32px 20px;gap:16px;display:flex;flex-direction:column;">
-        <div class="spinner" style="margin:0 auto;"></div>
-        <h2 style="text-align:center;">¡Ya estás dentro! 🎉</h2>
-        <p>Espera a que el organizador inicie el juego...</p>
-        <p style="font-size:0.8rem;opacity:0.4;">Puedes dejar esta pantalla abierta, te avisará automáticamente.</p>
       </div>
     </div>
 
-    <!-- ── PANTALLA INGRESO NÚMERO (MODIFICADA: + banner Nequi oculto) ── -->
+    <!-- ══ INGRESO NÚMERO ═══════════════════════════════════════ -->
     <div id="pantalla-ingreso-numero" class="pantalla">
-      <!-- NUEVO: Banner Nequi (oculto por defecto) -->
-      <div class="banner-nequi banner-nequi-participante" style="display:none;">
-        <div class="nequi-icon">💜</div>
-        <div class="nequi-info">
-          <div class="nequi-label">Paga tu botella por Nequi a:</div>
-          <div class="nequi-numero nequi-numero"></div>
-        </div>
-      </div>
       <div class="banner-info">
         <span style="font-size:1.2rem;">🔒</span>
         <span><strong>Privado.</strong> Solo tú ves tu número antes de que se revelen los resultados.</span>
@@ -572,7 +747,7 @@
       </div>
     </div>
 
-    <!-- ── PANTALLA NÚMERO GUARDADO (sin cambios) ── -->
+    <!-- ══ NÚMERO GUARDADO ══════════════════════════════════════ -->
     <div id="pantalla-numero-guardado" class="pantalla">
       <div class="tarjeta" style="text-align:center;padding:40px 20px;gap:16px;display:flex;flex-direction:column;">
         <div style="font-size:4rem;">✅</div>
@@ -583,7 +758,7 @@
       </div>
     </div>
 
-    <!-- ── PANTALLA RESULTADOS (MODIFICADA: + banner Nequi + panel pagos) ── -->
+    <!-- ══ RESULTADOS ═══════════════════════════════════════════ -->
     <div id="pantalla-resultados" class="pantalla">
       <div class="tarjeta" style="text-align:center;">
         <h2 style="text-align:center;font-size:2rem;">¡Resultados! 🎲</h2>
@@ -600,8 +775,6 @@
         <div class="resultado-nombre" id="res-perdedor-nombre">—</div>
         <div class="resultado-numero" id="res-perdedor-num">—</div>
       </div>
-
-      <!-- NUEVO: Banner Nequi en resultados (solo participantes) -->
       <div id="banner-nequi-resultados" class="banner-nequi" style="display:none;">
         <div class="nequi-icon">💜</div>
         <div class="nequi-info">
@@ -609,22 +782,15 @@
           <div class="nequi-numero" id="nequi-resultados-num">—</div>
         </div>
       </div>
-
       <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
         <p class="seccion-titulo">Todos los resultados</p>
         <div id="lista-resultados" class="lista-participantes" style="max-height:320px;"></div>
       </div>
-
-      <!-- NUEVO: Panel de pagos del host -->
       <div id="panel-pagos-host" class="tarjeta panel-pagos" style="display:none;">
-        <div class="panel-pagos-titulo">
-          <span>💳</span>
-          <span>Control de pagos</span>
-        </div>
+        <div class="panel-pagos-titulo"><span>💳</span><span>Control de pagos</span></div>
         <p style="font-size:0.82rem;color:rgba(255,255,255,0.4);margin-top:-4px;">Marca quién ya te pagó la botella</p>
         <div id="lista-pagos" class="lista-pagos"></div>
       </div>
-
       <button id="btn-nuevo-juego" class="btn btn-rojo">🔄 Nueva ronda</button>
     </div>
 
