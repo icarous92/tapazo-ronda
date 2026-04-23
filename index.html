@@ -86,7 +86,7 @@
         '❌ No hay admin configurado en Firebase. Agrega: admin/credenciales/{usuario, celular}.');
 
       const cred = snap.val().credenciales;
-      if (cred && cred.usuario === usuario && cred.celular === celularLimpio) {
+      if (cred && cred.usuario === usuario && String(cred.celular) === String(celularLimpio)) {
         soyAdmin = true;
         localStorage.setItem('tapazo_admin', JSON.stringify({ usuario, celular: celularLimpio }));
         await cargarPanelAdmin();
