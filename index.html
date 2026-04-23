@@ -97,26 +97,85 @@
     }
 
     async function cargarPanelAdmin() {
-      mostrar('admin-panel');
-      document.getElementById('admin-lista').innerHTML = '<p class="estado-vacio">Cargando...</p>';
+	  mostrar('admin-panel');
+	  document.getElementById('admin-lista').innerHTML = '<p class="estado-vacio">Cargando...</p>';
 
-      const snap = await get(ref(db, 'salas'));
-      if (!snap.exists()) {
-        document.getElementById('admin-sala-id').textContent = '—';
-        document.getElementById('admin-fase').textContent    = 'Sin sala activa';
-        document.getElementById('admin-lista').innerHTML     = '<p class="estado-vacio">No hay salas creadas aún.</p>';
-        return;
-      }
-      // Sala más reciente
-      const salas = snap.val();
-      let salaId = null, salaData = null, maxFecha = 0;
-      for (const [id, data] of Object.entries(salas)) {
-        if ((data.creadaEn || 0) > maxFecha) { maxFecha = data.creadaEn; salaId = id; salaData = data; }
-      }
-      document.getElementById('admin-sala-id').textContent = salaId;
-      document.getElementById('admin-fase').textContent    = traducirFase(salaData.fase);
-      escucharSala(salaId, data => renderAdminPanel(salaId, data));
-    }
+	  const snap = await get(ref(db, 'salas'));
+	  let salaActivaId = null, salaActivaData = null;
+	  let ultimaSalaId = null, ultimaSalaData = null;
+
+	  if (snap.exists()) {
+		const salas = snap.val();
+		let maxFecha = 0;
+		
+		for (const [id, data] of Object.entries(salas)) {
+		  // Encontrar la sala más reciente en la historia
+		  if ((data.creadaEn || 0) > maxFecha) { 
+			maxFecha = data.creadaEn; 
+			ultimaSalaId = id; 
+			ultimaSalaData = data; 
+		  }
+		  // Verificar si hay alguna sala viva (Regla 3)
+		  if (data.fase === 'esperando' || data.fase === 'jugando') {
+			salaActivaId = id;
+			salaActivaData = data;
+		  }
+		}
+	  }
+
+	  const salaAMostrarId = salaActivaId || ultimaSalaId;
+	  const salaAMostrarData = salaActivaData || ultimaSalaData;
+	  const controlActiva = document.getElementById('admin-sala-activa-control');
+	  const controlCrear  = document.getElementById('admin-crear-sala-control');
+	  const adminGuardado = JSON.parse(localStorage.getItem('tapazo_admin') || '{}');
+
+	  if (!salaAMostrarId) {
+		// Escenario: Base de datos limpia, cero salas
+		document.getElementById('admin-sala-id').textContent = '—';
+		document.getElementById('admin-fase').textContent    = 'Sin salas';
+		document.getElementById('admin-lista').innerHTML     = '<p class="estado-vacio">No hay salas creadas aún.</p>';
+		
+		controlActiva.style.display = 'none';
+		controlCrear.style.display  = 'flex';
+		if(adminGuardado.celular) document.getElementById('input-nequi-host').value = adminGuardado.celular;
+		return;
+	  }
+
+	  // Renderizar información de la sala superior
+	  document.getElementById('admin-sala-id').textContent = salaAMostrarId;
+	  document.getElementById('admin-fase').textContent    = traducirFase(salaAMostrarData.fase);
+
+	  if (salaActivaId) {
+		// REGLA 3: Hay una sala activa. Ocultamos crear, mostramos administrar.
+		controlActiva.style.display = 'block';
+		controlCrear.style.display  = 'none';
+		
+		document.getElementById('btn-ir-sala-activa').onclick = () => {
+		  miSalaId = salaActivaId;
+		  soyHost  = true;
+		  setURLSala(miSalaId);
+		  document.getElementById('link-sala').value = window.location.href.split('?')[0] + '?sala=' + miSalaId;
+		  
+		  if (salaActivaData.fase === 'esperando') {
+			mostrar('host-espera');
+			escucharSala(miSalaId, renderHostEspera);
+		  } else {
+			mostrar('host-monitoreo');
+			escucharSala(miSalaId, renderHostMonitoreo);
+		  }
+		};
+	  } else {
+		// REGLA 4: Si las salas previas están inactivas, permitimos crear.
+		controlActiva.style.display = 'none';
+		controlCrear.style.display  = 'flex';
+		
+		// REGLA 2: Autocompletar el Nequi con el celular de registro del Admin
+		if(adminGuardado.celular) document.getElementById('input-nequi-host').value = adminGuardado.celular;
+	  }
+
+	  // Escuchar a los jugadores de la sala que estamos mostrando
+	  escucharSala(salaAMostrarId, data => renderAdminPanel(salaAMostrarId, data));
+	}
 
     function traducirFase(f) {
       return { esperando: '⏳ Esperando', jugando: '🎮 En juego', resultados: '🏁 Finalizada' }[f] || f;
@@ -226,23 +285,26 @@
     //  HOST
     // ════════════════════════════════════════════════════════════
     async function crearSala() {
-      const nequi = document.getElementById('input-nequi-host').value.trim();
-      const celularValido = validarCelular(nequi);
-      if (!celularValido) {
-        mostrarError('error-nequi', '⚠️ Ingresa un número Nequi válido (mín. 10 dígitos).');
-        document.getElementById('input-nequi-host').focus();
-        return;
-      }
-      document.getElementById('error-nequi').classList.remove('visible');
+	  const nequi = document.getElementById('input-nequi-host').value.trim();
+	  const celularValido = validarCelular(nequi);
+	  if (!celularValido) {
+		mostrarError('error-nequi', '⚠️ Ingresa un número Nequi válido (mín. 10 dígitos).');
+		document.getElementById('input-nequi-host').focus();
+		return;
+	  }
+	  document.getElementById('error-nequi').classList.remove('visible');
 
-      const salaId = uid(6);
-      setURLSala(salaId);
-      await set(salaRef(salaId), { fase: 'esperando', creadaEn: Date.now(), nequiHost: celularValido });
-      miSalaId = salaId; soyHost = true;
-      document.getElementById('link-sala').value = window.location.href;
-      mostrar('host-espera');
-      escucharSala(salaId, renderHostEspera);
-    }
+	  const salaId = uid(6);
+	  setURLSala(salaId);
+	  await set(salaRef(salaId), { fase: 'esperando', creadaEn: Date.now(), nequiHost: celularValido });
+	  
+	  miSalaId = salaId; 
+	  soyHost = true;
+	  document.getElementById('link-sala').value = window.location.href.split('?')[0] + '?sala=' + salaId;
+	  
+	  mostrar('host-espera');
+	  escucharSala(salaId, renderHostEspera);
+	}
 
     function renderHostEspera(data) {
       const jugadores = data.jugadores ? Object.values(data.jugadores) : [];
@@ -368,14 +430,20 @@
     }
 
     function nuevoJuego() {
-      localStorage.removeItem('tapazo_jugador');
-      const url = new URL(window.location.href);
-      url.searchParams.delete('sala');
-      window.history.replaceState({}, '', url.toString());
-      miSalaId = null; miJugadorId = null; soyHost = false;
-      detenerEscucha();
-      mostrar('inicio');
-    }
+	  localStorage.removeItem('tapazo_jugador');
+	  const url = new URL(window.location.href);
+	  url.searchParams.delete('sala');
+	  window.history.replaceState({}, '', url.toString());
+	  miSalaId = null; miJugadorId = null; soyHost = false;
+	  detenerEscucha();
+	  
+	  // Si es el admin, lo mandamos a su panel. Si no, al inicio.
+	  if (soyAdmin) {
+		cargarPanelAdmin();
+	  } else {
+		mostrar('inicio');
+	  }
+	}
 
     // ════════════════════════════════════════════════════════════
     //  INIT
@@ -744,19 +812,13 @@
 
     <!-- ══ INICIO ══════════════════════════════════════════════ -->
     <div id="pantalla-inicio" class="pantalla">
-      <div class="tarjeta" style="text-align:center;padding:32px 20px;">
-        <div class="deco">🍺🎲🍺</div>
-        <h2 style="text-align:center;margin-top:12px;">¡Bienvenido!</h2>
-        <p style="margin-top:8px;">Crea una sala, comparte el link y cada quien se registra desde su propio celular.</p>
-      </div>
-      <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
-        <div class="campo-label">💜 Tu número Nequi (para recibir pagos)</div>
-        <input type="tel" id="input-nequi-host" placeholder="Ej: 3001234567" maxlength="15" inputmode="numeric" />
-        <div id="error-nequi" class="mensaje-error"></div>
-      </div>
-      <button id="btn-crear-sala" class="btn btn-verde">🎮 Crear nueva sala</button>
-      <button id="btn-acceso-admin" class="admin-acceso-btn">⚙ Acceso administrador</button>
-    </div>
+	  <div class="tarjeta" style="text-align:center;padding:32px 20px;">
+		<div class="deco">🍺🎲🍺</div>
+		<h2 style="text-align:center;margin-top:12px;">¡Bienvenido!</h2>
+		<p style="margin-top:8px;">Pídele el link de la sala al administrador para poder participar.</p>
+	  </div>
+	  <button id="btn-acceso-admin" class="btn btn-secundario" style="margin-top:16px;">⚙ Acceso Administrador</button>
+	</div>
 
     <!-- ══ ADMIN LOGIN ══════════════════════════════════════════ -->
     <div id="pantalla-admin-login" class="pantalla">
@@ -782,31 +844,46 @@
 
     <!-- ══ ADMIN PANEL ══════════════════════════════════════════ -->
     <div id="pantalla-admin-panel" class="pantalla">
-      <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
-        <div class="admin-header">
-          <h2 style="margin-bottom:0;">📊 Panel Admin</h2>
-          <span class="admin-badge">ADMIN</span>
-        </div>
-        <div class="admin-sala-info">
-          <div class="admin-sala-dato">
-            <div class="admin-sala-dato-label">Sala activa</div>
-            <div class="admin-sala-dato-val" id="admin-sala-id">—</div>
-          </div>
-          <div class="admin-divider"></div>
-          <div class="admin-sala-dato">
-            <div class="admin-sala-dato-label">Estado</div>
-            <div class="admin-sala-dato-val" id="admin-fase" style="font-size:0.95rem;">—</div>
-          </div>
-        </div>
-      </div>
-      <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
-        <p class="seccion-titulo">👥 Usuarios registrados</p>
-        <div id="admin-lista" class="lista-admin">
-          <p class="estado-vacio">Cargando...</p>
-        </div>
-      </div>
-      <button id="btn-cerrar-admin" class="btn btn-rojo" style="font-size:1.1rem;padding:14px 20px;">🚪 Cerrar sesión</button>
-    </div>
+	  <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
+		<div class="admin-header">
+		  <h2 style="margin-bottom:0;">📊 Panel Admin</h2>
+		  <span class="admin-badge">ADMIN</span>
+		</div>
+		<div class="admin-sala-info">
+		  <div class="admin-sala-dato">
+			<div class="admin-sala-dato-label">Sala actual</div>
+			<div class="admin-sala-dato-val" id="admin-sala-id">—</div>
+		  </div>
+		  <div class="admin-divider"></div>
+		  <div class="admin-sala-dato">
+			<div class="admin-sala-dato-label">Estado</div>
+			<div class="admin-sala-dato-val" id="admin-fase" style="font-size:0.95rem;">—</div>
+		  </div>
+		</div>
+
+		<div id="admin-sala-activa-control" style="display:none; margin-top:8px;">
+		  <button id="btn-ir-sala-activa" class="btn btn-verde">🎮 Administrar Sala Activa</button>
+		</div>
+
+		<div id="admin-crear-sala-control" style="display:none; flex-direction:column; gap:12px; margin-top:8px; padding-top:16px; border-top:1px solid rgba(255,255,255,0.1);">
+		  <p class="seccion-titulo" style="color:var(--verde-claro);">➕ Crear Nueva Sala</p>
+		  <div>
+			<div class="campo-label">💜 Nequi para pagos (Host)</div>
+			<input type="tel" id="input-nequi-host" placeholder="Ej: 3001234567" maxlength="15" inputmode="numeric" />
+			<div id="error-nequi" class="mensaje-error"></div>
+		  </div>
+		  <button id="btn-crear-sala" class="btn btn-amarillo">Crear y Abrir Sala</button>
+		</div>
+	  </div>
+
+	  <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
+		<p class="seccion-titulo">👥 Usuarios en la sala</p>
+		<div id="admin-lista" class="lista-admin">
+		  <p class="estado-vacio">Cargando...</p>
+		</div>
+	  </div>
+	  <button id="btn-cerrar-admin" class="btn btn-rojo" style="font-size:1.1rem;padding:14px 20px;">🚪 Cerrar sesión</button>
+	</div>
 
     <!-- ══ HOST ESPERA ══════════════════════════════════════════ -->
     <div id="pantalla-host-espera" class="pantalla">
