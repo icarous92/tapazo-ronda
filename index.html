@@ -337,9 +337,10 @@
     }
 
     async function guardarNumerosYRevelar() {
+      const btn = document.getElementById('btn-revelar-resultados');
       const inputs = document.querySelectorAll('.input-numero-host');
       let todosValidos = true;
-      const actualizaciones = {}; // Objeto para actualización atómica en Firebase
+      const actualizaciones = {};
 
       inputs.forEach(input => {
         const val = input.value.trim();
@@ -348,7 +349,6 @@
         if (val === '' || !Number.isInteger(Number(val)) || val.includes('.')) {
           todosValidos = false;
         } else {
-          // Preparamos la ruta de actualización para cada jugador
           actualizaciones[`jugadores/${jugId}/numero`] = parseInt(val, 10);
         }
       });
@@ -358,17 +358,28 @@
         return;
       }
 
-      // 1. Apagamos el listener del host temporalmente para evitar parpadeos
-      detenerEscucha(); 
-      
-      // 2. Añadimos el cambio de fase a la misma actualización atómica
-      actualizaciones['fase'] = 'resultados';
-      
-      // 3. Ejecutamos un único UPDATE en la base de datos
-      await update(salaRef(miSalaId), actualizaciones);
-      
-      // 4. Mostramos los resultados
-      cargarYMostrarResultados(miSalaId);
+      // 1. Bloquear botón y dar feedback visual
+      const textoOriginal = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '⏳ Procesando...';
+
+      try {
+        detenerEscucha(); 
+        actualizaciones['fase'] = 'resultados';
+        
+        // 2. Ejecutar la actualización atómica
+        await update(salaRef(miSalaId), actualizaciones);
+        
+        // 3. Mostrar resultados
+        await cargarYMostrarResultados(miSalaId);
+      } catch (error) {
+        console.error("Error en Firebase:", error);
+        mostrarError('error-numeros-host', '❌ Error de conexión al guardar. Intenta de nuevo.');
+      } finally {
+        // Restaurar el botón por si ocurrió un error y no cambió la pantalla
+        btn.disabled = false;
+        btn.textContent = textoOriginal;
+      }
     }
 
     // ════════════════════════════════════════════════════════════
@@ -491,6 +502,7 @@
           if (cred && cred.usuario === adminGuardado.usuario && String(cred.celular) === String(adminGuardado.celular)) {
             soyAdmin = true;
             bindAdminEvents();
+			bindHostEvents();
             await cargarPanelAdmin();
             return;
           }
