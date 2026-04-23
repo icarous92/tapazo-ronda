@@ -318,24 +318,57 @@
 
     async function iniciarJuego() { await update(salaRef(miSalaId), { fase: 'jugando' }); }
 
+    // ════════════════════════════════════════════════════════════
+    //  NUEVO FLUJO DEL HOST — Ingreso de todos los números
+    // ════════════════════════════════════════════════════════════
     function renderHostMonitoreo(data) {
-      const jugadores = data.jugadores ? Object.values(data.jugadores) : [];
-      // Corrección: Filtrar estrictamente por tipo número
-      const listos    = jugadores.filter(j => typeof j.numero === 'number').length;
-      document.getElementById('monitor-listos').textContent     = listos;
-      document.getElementById('monitor-pendientes').textContent = jugadores.length - listos;
-      document.getElementById('monitor-total').textContent      = jugadores.length;
-      document.getElementById('lista-monitoreo').innerHTML = jugadores.map(j =>
-        `<div class="item-participante">
-           <span>👤 ${escaparHTML(j.nombre)}</span>
-           ${typeof j.numero === 'number' ? '<span class="badge-verde">✅ Listo</span>' : '<span class="badge-pendiente">⏳ Pendiente</span>'}
-         </div>`).join('');
-      // Corrección: Solo pasa a resultados si TODOS tienen número estricto
-      if (jugadores.length >= 2 && jugadores.every(j => typeof j.numero === 'number')) {
-        detenerEscucha();
-        update(salaRef(miSalaId), { fase: 'resultados' });
-        cargarYMostrarResultados(miSalaId);
+      const jugadores = data.jugadores ? Object.entries(data.jugadores).map(([id, j]) => ({ ...j, _id: id })) : [];
+      
+      // Renderizamos un input por cada jugador
+      document.getElementById('lista-monitoreo').innerHTML = jugadores.map((j, i) => `
+        <div class="item-participante" style="flex-direction:column; align-items:flex-start; gap:8px;">
+          <span style="font-size:1.1rem;">👤 ${escaparHTML(j.nombre)}</span>
+          <input type="number" class="input-link input-numero-host" 
+                 data-id="${j._id}" 
+                 placeholder="Número de tapa..." 
+                 value="${typeof j.numero === 'number' ? j.numero : ''}"
+                 inputmode="numeric" />
+        </div>`).join('');
+    }
+
+    async function guardarNumerosYRevelar() {
+      const inputs = document.querySelectorAll('.input-numero-host');
+      let todosValidos = true;
+      const actualizaciones = {}; // Objeto para actualización atómica en Firebase
+
+      inputs.forEach(input => {
+        const val = input.value.trim();
+        const jugId = input.getAttribute('data-id');
+        
+        if (val === '' || !Number.isInteger(Number(val)) || val.includes('.')) {
+          todosValidos = false;
+        } else {
+          // Preparamos la ruta de actualización para cada jugador
+          actualizaciones[`jugadores/${jugId}/numero`] = parseInt(val, 10);
+        }
+      });
+
+      if (!todosValidos) {
+        mostrarError('error-numeros-host', '⚠️ Por favor ingresa un número válido para todos los jugadores.');
+        return;
       }
+
+      // 1. Apagamos el listener del host temporalmente para evitar parpadeos
+      detenerEscucha(); 
+      
+      // 2. Añadimos el cambio de fase a la misma actualización atómica
+      actualizaciones['fase'] = 'resultados';
+      
+      // 3. Ejecutamos un único UPDATE en la base de datos
+      await update(salaRef(miSalaId), actualizaciones);
+      
+      // 4. Mostramos los resultados
+      cargarYMostrarResultados(miSalaId);
     }
 
     // ════════════════════════════════════════════════════════════
@@ -521,9 +554,11 @@
       document.getElementById('btn-crear-sala')?.addEventListener('click', crearSala);
       document.getElementById('input-nequi-host')?.addEventListener('keydown', e => { if (e.key==='Enter') crearSala(); });
       document.getElementById('btn-iniciar-juego')?.addEventListener('click', iniciarJuego);
-      document.getElementById('btn-guardar-numero')?.addEventListener('click', guardarMiNumero);
+      
+      // NUEVO: Botón del host para guardar números y revelar
+      document.getElementById('btn-revelar-resultados')?.addEventListener('click', guardarNumerosYRevelar);
+      
       document.getElementById('btn-nuevo-juego')?.addEventListener('click', nuevoJuego);
-      document.getElementById('input-numero')?.addEventListener('keydown', e => { if (e.key==='Enter') guardarMiNumero(); });
       document.getElementById('btn-copiar-link')?.addEventListener('click', () => {
         navigator.clipboard.writeText(document.getElementById('link-sala').value).then(() => {
           const btn = document.getElementById('btn-copiar-link');
@@ -545,9 +580,7 @@
       });
       document.getElementById('input-celular-unirse')?.addEventListener('keydown', e => {
         if (e.key === 'Enter') registrarParticipante(salaId);
-      });
-      document.getElementById('btn-guardar-numero')?.addEventListener('click', guardarMiNumero);
-      document.getElementById('input-numero')?.addEventListener('keydown', e => { if (e.key==='Enter') guardarMiNumero(); });
+      });      
     }
 
     function bindAdminEvents() {
@@ -906,17 +939,26 @@
 
     <div id="pantalla-host-monitoreo" class="pantalla">
       <div class="tarjeta" style="text-align:center;gap:6px;display:flex;flex-direction:column;">
-        <h2 style="text-align:center;">⏳ Esperando números...</h2>
-        <p>Cada participante ingresa su número desde su cel.</p>
-      </div>
-      <div class="stats-row">
-        <div class="stat-box"><div class="stat-numero" id="monitor-listos">0</div><div class="stat-label">✅ Listos</div></div>
-        <div class="stat-box"><div class="stat-numero" id="monitor-pendientes">0</div><div class="stat-label">⏳ Pendientes</div></div>
-        <div class="stat-box"><div class="stat-numero" id="monitor-total">0</div><div class="stat-label">Total</div></div>
+        <h2 style="text-align:center;">✍️ Ingresa los números</h2>
+        <p>Escribe el número de la tapa para cada participante.</p>
       </div>
       <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
-        <p class="seccion-titulo">Estado por jugador</p>
-        <div id="lista-monitoreo" class="lista-participantes" style="max-height:320px;"></div>
+        <p class="seccion-titulo">Participantes</p>
+        <div id="lista-monitoreo" class="lista-participantes" style="max-height:400px;"></div>
+        <div id="error-numeros-host" class="mensaje-error">⚠️ Ingresa números válidos para todos.</div>
+        <button id="btn-revelar-resultados" class="btn btn-verde" style="margin-top: 10px;">🎯 Revelar Resultados</button>
+      </div>
+    </div>
+
+    <div id="pantalla-ingreso-numero" class="pantalla">
+      <div class="banner-info">
+        <span style="font-size:1.2rem;">⏳</span>
+        <span>El administrador está ingresando los números de las tapas...</span>
+      </div>
+      <div class="tarjeta" style="text-align:center;padding:40px 20px;gap:16px;display:flex;flex-direction:column;">
+        <div class="spinner" style="margin:8px auto 0;"></div>
+        <h2 style="text-align:center;color:#fff;">¡Preparando resultados!</h2>
+        <p style="font-size:0.9rem;color:rgba(255,255,255,0.6);">Cruza los dedos para no sacar el número más bajo.</p>
       </div>
     </div>
 
@@ -954,33 +996,6 @@
           <div class="nequi-label">Paga tu botella por Nequi a:</div>
           <div class="nequi-numero" id="confirmacion-nequi-num">—</div>
         </div>
-      </div>
-    </div>
-
-    <div id="pantalla-ingreso-numero" class="pantalla">
-      <div class="banner-info">
-        <span style="font-size:1.2rem;">🔒</span>
-        <span><strong>Privado.</strong> Solo tú ves tu número antes de que se revelen los resultados.</span>
-      </div>
-      <div class="tarjeta" style="text-align:center;gap:8px;display:flex;flex-direction:column;">
-        <p style="font-size:0.9rem;color:rgba(255,255,255,0.5);">Es el turno de:</p>
-        <div class="turno-nombre" id="nombre-turno">—</div>
-      </div>
-      <div class="tarjeta" style="gap:12px;display:flex;flex-direction:column;">
-        <p style="color:rgba(255,255,255,0.6);font-size:0.9rem;text-align:center;">📌 Escribe el número de tu tapa</p>
-        <input type="number" id="input-numero" class="input-grande" placeholder="000" inputmode="numeric" />
-        <div id="error-numero" class="mensaje-error">⚠️ Ingresa un número entero válido.</div>
-        <button id="btn-guardar-numero" class="btn btn-verde">✅ Guardar número</button>
-      </div>
-    </div>
-
-    <div id="pantalla-numero-guardado" class="pantalla">
-      <div class="tarjeta" style="text-align:center;padding:40px 20px;gap:16px;display:flex;flex-direction:column;">
-        <div style="font-size:4rem;">✅</div>
-        <h2 style="text-align:center;color:#fff;">¡Número guardado!</h2>
-        <p>Esperando a que los demás ingresen su número...</p>
-        <div class="spinner" style="margin:8px auto 0;"></div>
-        <p style="font-size:0.8rem;opacity:0.4;">Los resultados aparecerán automáticamente.</p>
       </div>
     </div>
 
